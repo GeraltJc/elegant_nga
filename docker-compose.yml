@@ -1,0 +1,42 @@
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    depends_on:
+      - php
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ./backend:/var/www/backend:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+
+  php:
+    build:
+      context: ./docker/php
+      args:
+        TZ: "${TZ:-Asia/Shanghai}"
+    depends_on:
+      - mysql
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ./backend:/var/www/backend
+
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-elegant_nga}"
+      MYSQL_USER: "${MYSQL_USER:-elegant_nga}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-elegant_nga}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root}"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+
+volumes:
+  mysql_data:
+

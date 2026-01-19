@@ -5,3 +5,7 @@
 .DS_Store
 .idea
 .vscode
+logs/*
+storage/*
+!logs/.gitkeep
+!storage/.gitkeep
