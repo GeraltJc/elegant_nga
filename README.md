@@ -52,3 +52,9 @@ npm test
 ```
 
 > Node 建议版本：`20.19+` 或 `22+`（避免脚手架/依赖的引擎限制警告）。
+
+### 5) CI（GitHub Actions）
+
+- 工作流：`.github/workflows/ci.yml`
+- 后端：`composer install` → `php artisan migrate` → `php artisan test`（SQLite）
+- 前端：`npm ci` → `npm test` → `npm run build`
