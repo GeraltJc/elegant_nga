@@ -51,7 +51,7 @@ cd frontend
 npm test
 ```
 
-> Node 建议版本：`20.19+` 或 `22+`（避免脚手架/依赖的引擎限制警告）。
+> Node 版本：`20.19`（见 `.nvmrc`）。
 
 ### 5) CI（GitHub Actions）
 
