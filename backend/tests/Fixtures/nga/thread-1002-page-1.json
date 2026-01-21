@@ -1,0 +1,18 @@
+{
+  "tid": 1002,
+  "page": 1,
+  "page_total": 1,
+  "posts": [
+    {
+      "pid": 9101,
+      "floor": 1,
+      "author": "Bob",
+      "author_id": 502,
+      "post_time": "2026-01-19 09:30:00",
+      "content": "Opening post",
+      "is_deleted": 0,
+      "is_folded": 0,
+      "edited_at": null
+    }
+  ]
+}

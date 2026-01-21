@@ -1,0 +1,29 @@
+{
+  "tid": 1001,
+  "page": 1,
+  "page_total": 1,
+  "posts": [
+    {
+      "pid": 9001,
+      "floor": 1,
+      "author": "Alice",
+      "author_id": 501,
+      "post_time": "2026-01-19 10:00:00",
+      "content": "[b]Hello[/b]",
+      "is_deleted": 0,
+      "is_folded": 0,
+      "edited_at": null
+    },
+    {
+      "pid": 9002,
+      "floor": 2,
+      "author": "Bob",
+      "author_id": 502,
+      "post_time": "2026-01-19 10:05:00",
+      "content": "Reply content",
+      "is_deleted": 0,
+      "is_folded": 0,
+      "edited_at": null
+    }
+  ]
+}

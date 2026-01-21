@@ -1,0 +1,29 @@
+{
+  "fid": 7,
+  "threads": [
+    {
+      "tid": 1001,
+      "title": "[water] First thread",
+      "author": "Alice",
+      "author_id": 501,
+      "post_time": "2026-01-19 10:00:00",
+      "last_reply": "2026-01-19 11:00:00",
+      "reply_count": 2,
+      "view_count": 10,
+      "is_pinned": 0,
+      "is_digest": 1
+    },
+    {
+      "tid": 1002,
+      "title": "Second thread",
+      "author": "Bob",
+      "author_id": 502,
+      "post_time": "2026-01-19 09:30:00",
+      "last_reply": null,
+      "reply_count": 0,
+      "view_count": 3,
+      "is_pinned": 1,
+      "is_digest": 0
+    }
+  ]
+}
