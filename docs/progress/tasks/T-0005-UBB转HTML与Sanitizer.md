@@ -1,6 +1,6 @@
 # T-0005 - UBB转HTML与Sanitizer
 
-- status: todo
+- status: done
 - created: 2026-01-20
 - owner: (optional)
 - related:
@@ -21,9 +21,9 @@
 
 ## Acceptance
 
-- [ ] 常见 UBB 标签可转换为可展示 HTML
-- [ ] 清洗后 HTML 不含危险标签/属性
-- [ ] fixtures 覆盖边界与异常输入
+- [x] 常见 UBB 标签可转换为可展示 HTML
+- [x] 清洗后 HTML 不含危险标签/属性
+- [x] fixtures 覆盖边界与异常输入
 
 ## Plan
 
@@ -34,3 +34,8 @@
 ## Notes
 
 - 输出字段写入 `posts.content_html`
+- UBB 标签：`b/i/u/s/del/quote/code/url/img/list`（`color/size` 按纯文本）
+- 指纹基于原始内容，HTML 为安全清洗结果
+- Sanitizer：`ezyang/htmlpurifier`
+- 验收：`php artisan test --filter NgaPostContentProcessorTest`（Docker）
+- 验收：`php artisan test --filter NgaLiteCrawlerTest`（Docker）

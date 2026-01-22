@@ -15,7 +15,8 @@ class NgaLiteCrawler
     public function __construct(
         private readonly NgaLiteClient $client,
         private readonly NgaLiteListParser $listParser,
-        private readonly NgaLiteThreadParser $threadParser
+        private readonly NgaLiteThreadParser $threadParser,
+        private readonly NgaPostContentProcessor $contentProcessor
     ) {
     }
 
@@ -161,6 +162,8 @@ class NgaLiteCrawler
                 }
 
                 $content = (string) ($postData['content_raw'] ?? '');
+                $contentFormat = (string) ($postData['content_format'] ?? 'ubb');
+                $contentHtml = $this->contentProcessor->toSafeHtml($content, $contentFormat);
                 $fingerprint = hash('sha256', $content);
 
                 $post = Post::firstOrNew([
@@ -177,7 +180,7 @@ class NgaLiteCrawler
                     'author_name' => $postData['author_name'],
                     'author_source_user_id' => $postData['author_source_user_id'],
                     'post_created_at' => $postData['post_created_at'],
-                    'content_html' => $content,
+                    'content_html' => $contentHtml,
                     'content_fingerprint_sha256' => $fingerprint,
                     'is_deleted_by_source' => $postData['is_deleted_by_source'],
                     'is_folded_by_source' => $postData['is_folded_by_source'],

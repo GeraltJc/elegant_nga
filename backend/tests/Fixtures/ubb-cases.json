@@ -1,0 +1,102 @@
+[
+  {
+    "name": "bold",
+    "format": "ubb",
+    "input": "[b]Hello[/b]",
+    "expected": "<strong>Hello</strong>"
+  },
+  {
+    "name": "line_breaks",
+    "format": "ubb",
+    "input": "line1\nline2",
+    "expected": "line1<br>line2"
+  },
+  {
+    "name": "url_simple",
+    "format": "ubb",
+    "input": "[url]https://example.com/path?a=1&b=2[/url]",
+    "expected_contains": [
+      "<a ",
+      "href=\"https://example.com/path?a=1&amp;b=2\"",
+      "rel=\"nofollow noopener noreferrer\"",
+      "target=\"_blank\"",
+      ">https://example.com/path?a=1&amp;b=2</a>"
+    ]
+  },
+  {
+    "name": "url_attr_text",
+    "format": "ubb",
+    "input": "[url=https://example.com]点击[/url]",
+    "expected_contains": [
+      "href=\"https://example.com\"",
+      ">点击</a>"
+    ]
+  },
+  {
+    "name": "url_invalid_scheme",
+    "format": "ubb",
+    "input": "[url=javascript:alert(1)]x[/url]",
+    "expected": "[url=javascript:alert(1)]x[/url]",
+    "expected_not_contains": [
+      "<a "
+    ]
+  },
+  {
+    "name": "img_valid",
+    "format": "ubb",
+    "input": "[img]https://example.com/a.png[/img]",
+    "expected_contains": [
+      "<img ",
+      "src=\"https://example.com/a.png\"",
+      "loading=\"lazy\"",
+      "referrerpolicy=\"no-referrer\""
+    ]
+  },
+  {
+    "name": "img_invalid_scheme",
+    "format": "ubb",
+    "input": "[img]javascript:alert(1)[/img]",
+    "expected": "[img]javascript:alert(1)[/img]",
+    "expected_not_contains": [
+      "<img"
+    ]
+  },
+  {
+    "name": "code_no_parse",
+    "format": "ubb",
+    "input": "[code][b]x[/b]\nline[/code]",
+    "expected": "<pre><code>[b]x[/b]\nline</code></pre>"
+  },
+  {
+    "name": "list_basic",
+    "format": "ubb",
+    "input": "[list][*]a[*]b[/list]",
+    "expected": "<ul><li>a</li><li>b</li></ul>"
+  },
+  {
+    "name": "html_strip_script",
+    "format": "html",
+    "input": "<script>alert(1)</script><a href=\"javascript:alert(1)\" onclick=\"x\">x</a>",
+    "expected_contains": [
+      "x"
+    ],
+    "expected_not_contains": [
+      "<script",
+      "javascript:",
+      "onclick"
+    ]
+  },
+  {
+    "name": "html_img_policy",
+    "format": "html",
+    "input": "<img src=\"https://example.com/x.png\" onerror=\"alert(1)\">",
+    "expected_contains": [
+      "src=\"https://example.com/x.png\"",
+      "loading=\"lazy\"",
+      "referrerpolicy=\"no-referrer\""
+    ],
+    "expected_not_contains": [
+      "onerror"
+    ]
+  }
+]

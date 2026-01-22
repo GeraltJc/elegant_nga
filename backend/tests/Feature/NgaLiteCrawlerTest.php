@@ -9,6 +9,7 @@ use App\Services\Nga\NgaLiteClient;
 use App\Services\Nga\NgaLiteCrawler;
 use App\Services\Nga\NgaLiteListParser;
 use App\Services\Nga\NgaLitePayloadDecoder;
+use App\Services\Nga\NgaPostContentProcessor;
 use App\Services\Nga\NgaLiteThreadParser;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -38,7 +39,7 @@ class NgaLiteCrawlerTest extends TestCase
 
         $post = Post::where('source_post_id', 9001)->firstOrFail();
         $this->assertSame(1, $post->floor_number);
-        $this->assertSame('[b]Hello[/b]', $post->content_html);
+        $this->assertSame('<strong>Hello</strong>', $post->content_html);
     }
 
     public function test_crawl_is_idempotent(): void
@@ -366,8 +367,9 @@ class NgaLiteCrawlerTest extends TestCase
         $decoder = new NgaLitePayloadDecoder();
         $listParser = new NgaLiteListParser($decoder);
         $threadParser = new NgaLiteThreadParser($decoder);
+        $contentProcessor = NgaPostContentProcessor::makeDefault();
 
-        return new NgaLiteCrawler($client, $listParser, $threadParser);
+        return new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
     }
 
     /**

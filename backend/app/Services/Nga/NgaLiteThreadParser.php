@@ -93,6 +93,7 @@ class NgaLiteThreadParser
                 'author_source_user_id' => $authorId,
                 'post_created_at' => $this->dateValue($post, ['postdatetimestamp', 'post_time', 'post_created_at', 'created_at', 'post_at', 'postdate']),
                 'content_raw' => $this->stringValue($post, ['content', 'content_raw', 'content_html', 'message']),
+                'content_format' => 'ubb',
                 'is_deleted_by_source' => $this->boolValue($post, ['is_deleted', 'is_deleted_by_source', 'deleted'], false),
                 'is_folded_by_source' => $this->boolValue($post, ['is_folded', 'is_folded_by_source', 'folded'], false),
                 'source_edited_at' => $this->parseEditedAt($post),
@@ -169,6 +170,7 @@ class NgaLiteThreadParser
                 'post_created_at' => $createdAt,
                 // HTML 模式暂存原始内容片段（后续由 UBB/HTML 处理任务覆盖）
                 'content_raw' => $contentHtml,
+                'content_format' => 'html',
                 'is_deleted_by_source' => $isDeleted,
                 'is_folded_by_source' => $isFolded,
                 'source_edited_at' => null,

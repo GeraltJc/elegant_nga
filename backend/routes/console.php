@@ -7,6 +7,7 @@ use App\Services\Nga\HttpNgaLiteClient;
 use App\Services\Nga\NgaLiteCrawler;
 use App\Services\Nga\NgaLiteListParser;
 use App\Services\Nga\NgaLitePayloadDecoder;
+use App\Services\Nga\NgaPostContentProcessor;
 use App\Services\Nga\NgaLiteThreadParser;
 
 Artisan::command('inspire', function () {
@@ -33,7 +34,8 @@ Artisan::command('nga:crawl-lite {--source=http} {--fid=7} {--list-page=1} {--ma
         $client = new HttpNgaLiteClient($fid);
     }
 
-    $crawler = new NgaLiteCrawler($client, $listParser, $threadParser);
+    $contentProcessor = NgaPostContentProcessor::makeDefault();
+    $crawler = new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
     $result = $crawler->crawlForum($fid, $maxPostPages, $recentDays, $listPage);
 
     $this->info("Threads upserted: {$result['threads']}");
