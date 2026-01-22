@@ -22,6 +22,8 @@ class Thread extends Model
         'last_crawled_at' => 'datetime',
         'last_detected_change_at' => 'datetime',
         'title_last_changed_at' => 'datetime',
+        'is_skipped_by_page_total_limit' => 'boolean',
+        'skipped_by_page_total_limit_at' => 'datetime',
     ];
 
     public function forum(): BelongsTo

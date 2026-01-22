@@ -1,0 +1,195 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        if (!in_array(DB::getDriverName(), ['mysql', 'mariadb'], true)) {
+            return;
+        }
+
+        DB::statement(<<<'SQL'
+ALTER TABLE users
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+    MODIFY COLUMN name VARCHAR(255) NOT NULL COMMENT '用户名',
+    MODIFY COLUMN email VARCHAR(255) NOT NULL COMMENT '邮箱',
+    MODIFY COLUMN email_verified_at TIMESTAMP NULL COMMENT '邮箱验证时间',
+    MODIFY COLUMN password VARCHAR(255) NOT NULL COMMENT '密码哈希',
+    MODIFY COLUMN remember_token VARCHAR(100) NULL COMMENT '记住我令牌',
+    MODIFY COLUMN created_at TIMESTAMP NULL COMMENT '创建时间',
+    MODIFY COLUMN updated_at TIMESTAMP NULL COMMENT '更新时间',
+    COMMENT='系统用户表'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE password_reset_tokens
+    MODIFY COLUMN email VARCHAR(255) NOT NULL COMMENT '用户邮箱',
+    MODIFY COLUMN token VARCHAR(255) NOT NULL COMMENT '重置令牌',
+    MODIFY COLUMN created_at TIMESTAMP NULL COMMENT '创建时间',
+    COMMENT='密码重置令牌'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE sessions
+    MODIFY COLUMN id VARCHAR(255) NOT NULL COMMENT '会话 ID',
+    MODIFY COLUMN user_id BIGINT UNSIGNED NULL COMMENT '用户 ID',
+    MODIFY COLUMN ip_address VARCHAR(45) NULL COMMENT '客户端 IP',
+    MODIFY COLUMN user_agent TEXT NULL COMMENT '客户端 UA',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '会话内容',
+    MODIFY COLUMN last_activity INT NOT NULL COMMENT '最近活动时间（时间戳）',
+    COMMENT='会话表'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE cache
+    MODIFY COLUMN `key` VARCHAR(255) NOT NULL COMMENT '缓存键',
+    MODIFY COLUMN value MEDIUMTEXT NOT NULL COMMENT '缓存值',
+    MODIFY COLUMN expiration INT NOT NULL COMMENT '过期时间（时间戳）',
+    COMMENT='缓存表'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE cache_locks
+    MODIFY COLUMN `key` VARCHAR(255) NOT NULL COMMENT '锁键',
+    MODIFY COLUMN owner VARCHAR(255) NOT NULL COMMENT '锁持有者',
+    MODIFY COLUMN expiration INT NOT NULL COMMENT '过期时间（时间戳）',
+    COMMENT='缓存锁表'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE jobs
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+    MODIFY COLUMN queue VARCHAR(255) NOT NULL COMMENT '队列名称',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '任务负载',
+    MODIFY COLUMN attempts TINYINT UNSIGNED NOT NULL COMMENT '已尝试次数',
+    MODIFY COLUMN reserved_at INT UNSIGNED NULL COMMENT '预留时间（时间戳）',
+    MODIFY COLUMN available_at INT UNSIGNED NOT NULL COMMENT '可执行时间（时间戳）',
+    MODIFY COLUMN created_at INT UNSIGNED NOT NULL COMMENT '创建时间（时间戳）',
+    COMMENT='队列任务'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE job_batches
+    MODIFY COLUMN id VARCHAR(255) NOT NULL COMMENT '批次 ID',
+    MODIFY COLUMN name VARCHAR(255) NOT NULL COMMENT '批次名称',
+    MODIFY COLUMN total_jobs INT NOT NULL COMMENT '总任务数',
+    MODIFY COLUMN pending_jobs INT NOT NULL COMMENT '待处理任务数',
+    MODIFY COLUMN failed_jobs INT NOT NULL COMMENT '失败任务数',
+    MODIFY COLUMN failed_job_ids LONGTEXT NOT NULL COMMENT '失败任务 ID 列表',
+    MODIFY COLUMN options MEDIUMTEXT NULL COMMENT '批次选项',
+    MODIFY COLUMN cancelled_at INT NULL COMMENT '取消时间（时间戳）',
+    MODIFY COLUMN created_at INT NOT NULL COMMENT '创建时间（时间戳）',
+    MODIFY COLUMN finished_at INT NULL COMMENT '完成时间（时间戳）',
+    COMMENT='队列批次'
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE failed_jobs
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+    MODIFY COLUMN uuid VARCHAR(255) NOT NULL COMMENT '唯一 ID',
+    MODIFY COLUMN connection TEXT NOT NULL COMMENT '连接名称',
+    MODIFY COLUMN queue TEXT NOT NULL COMMENT '队列名称',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '任务负载',
+    MODIFY COLUMN exception LONGTEXT NOT NULL COMMENT '异常信息',
+    MODIFY COLUMN failed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '失败时间',
+    COMMENT='失败任务'
+SQL);
+    }
+
+    public function down(): void
+    {
+        if (!in_array(DB::getDriverName(), ['mysql', 'mariadb'], true)) {
+            return;
+        }
+
+        DB::statement(<<<'SQL'
+ALTER TABLE users
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '',
+    MODIFY COLUMN name VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN email VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN email_verified_at TIMESTAMP NULL COMMENT '',
+    MODIFY COLUMN password VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN remember_token VARCHAR(100) NULL COMMENT '',
+    MODIFY COLUMN created_at TIMESTAMP NULL COMMENT '',
+    MODIFY COLUMN updated_at TIMESTAMP NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE password_reset_tokens
+    MODIFY COLUMN email VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN token VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN created_at TIMESTAMP NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE sessions
+    MODIFY COLUMN id VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN user_id BIGINT UNSIGNED NULL COMMENT '',
+    MODIFY COLUMN ip_address VARCHAR(45) NULL COMMENT '',
+    MODIFY COLUMN user_agent TEXT NULL COMMENT '',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN last_activity INT NOT NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE cache
+    MODIFY COLUMN `key` VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN value MEDIUMTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN expiration INT NOT NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE cache_locks
+    MODIFY COLUMN `key` VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN owner VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN expiration INT NOT NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE jobs
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '',
+    MODIFY COLUMN queue VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN attempts TINYINT UNSIGNED NOT NULL COMMENT '',
+    MODIFY COLUMN reserved_at INT UNSIGNED NULL COMMENT '',
+    MODIFY COLUMN available_at INT UNSIGNED NOT NULL COMMENT '',
+    MODIFY COLUMN created_at INT UNSIGNED NOT NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE job_batches
+    MODIFY COLUMN id VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN name VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN total_jobs INT NOT NULL COMMENT '',
+    MODIFY COLUMN pending_jobs INT NOT NULL COMMENT '',
+    MODIFY COLUMN failed_jobs INT NOT NULL COMMENT '',
+    MODIFY COLUMN failed_job_ids LONGTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN options MEDIUMTEXT NULL COMMENT '',
+    MODIFY COLUMN cancelled_at INT NULL COMMENT '',
+    MODIFY COLUMN created_at INT NOT NULL COMMENT '',
+    MODIFY COLUMN finished_at INT NULL COMMENT '',
+    COMMENT=''
+SQL);
+
+        DB::statement(<<<'SQL'
+ALTER TABLE failed_jobs
+    MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '',
+    MODIFY COLUMN uuid VARCHAR(255) NOT NULL COMMENT '',
+    MODIFY COLUMN connection TEXT NOT NULL COMMENT '',
+    MODIFY COLUMN queue TEXT NOT NULL COMMENT '',
+    MODIFY COLUMN payload LONGTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN exception LONGTEXT NOT NULL COMMENT '',
+    MODIFY COLUMN failed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '',
+    COMMENT=''
+SQL);
+    }
+};
