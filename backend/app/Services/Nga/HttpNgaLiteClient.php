@@ -4,6 +4,7 @@ namespace App\Services\Nga;
 
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class HttpNgaLiteClient implements NgaLiteClient
@@ -22,6 +23,7 @@ class HttpNgaLiteClient implements NgaLiteClient
         return $this->fetchWithGuest('thread.php', [
             'fid' => $fid,
             'page' => $page,
+            'order_by' => 'postdatedesc',
         ]);
     }
 
@@ -65,6 +67,7 @@ class HttpNgaLiteClient implements NgaLiteClient
         // 首次访客访问用于获取 guestJs 与 lastvisit
         $response = $this->request('thread.php', [
             'fid' => $this->forumId,
+            'order_by' => 'postdatedesc',
         ], false);
 
         $guestJs = $this->extractGuestJs($response->body());
@@ -82,7 +85,8 @@ class HttpNgaLiteClient implements NgaLiteClient
     {
         $query['rand'] = $this->randomRand();
 
-        $http = Http::withHeaders($this->defaultHeaders());
+        $headers = $this->defaultHeaders();
+        $http = Http::withHeaders($headers);
         if ($withCookies && $this->guestJs !== null && $this->lastVisit !== null) {
             // 访客身份通过 cookie 维持
             $http = $http->withCookies([
@@ -91,7 +95,38 @@ class HttpNgaLiteClient implements NgaLiteClient
             ], 'nga.178.com');
         }
 
-        return $http->get($this->buildUrl($path), $query);
+        $url = $this->buildUrl($path);
+        $start = microtime(true);
+
+        try {
+            $response = $http->get($url, $query);
+        } catch (\Throwable $exception) {
+            $durationMs = (int) round((microtime(true) - $start) * 1000);
+            Log::error('NGA HTTP request failed', [
+                'method' => 'GET',
+                'url' => $url,
+                'query' => $query,
+                'with_cookies' => $withCookies,
+                'headers' => $headers,
+                'duration_ms' => $durationMs,
+                'error' => $exception->getMessage(),
+            ]);
+            throw $exception;
+        }
+
+        $durationMs = (int) round((microtime(true) - $start) * 1000);
+        Log::info('NGA HTTP request finished', [
+            'method' => 'GET',
+            'url' => $url,
+            'query' => $query,
+            'with_cookies' => $withCookies,
+            'headers' => $headers,
+            'status' => $response->status(),
+            'duration_ms' => $durationMs,
+            'body_bytes' => strlen((string) $response->body()),
+        ]);
+
+        return $response;
     }
 
     private function defaultHeaders(): array

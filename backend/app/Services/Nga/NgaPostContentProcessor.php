@@ -25,6 +25,21 @@ class NgaPostContentProcessor
         $format = strtolower(trim((string) $format));
         $html = $format === 'html' ? $raw : $this->ubbConverter->convert($raw);
 
-        return $this->sanitizer->sanitize($html);
+        $sanitized = $this->sanitizer->sanitize($html);
+
+        return $this->trimEdgeLineBreaks($sanitized);
+    }
+
+    private function trimEdgeLineBreaks(string $html): string
+    {
+        if ($html === '') {
+            return '';
+        }
+
+        // 关键规则：移除仅位于首尾的 <br>，避免引入原文没有的空行
+        $trimmed = preg_replace('/^(?:\\s*<br\\s*\\/?>\\s*)+/i', '', $html);
+        $trimmed = preg_replace('/(?:\\s*<br\\s*\\/?>\\s*)+$/i', '', $trimmed ?? '');
+
+        return $trimmed ?? '';
     }
 }

@@ -38,7 +38,7 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame('Alice', $thread->author_name);
 
         $post = Post::where('source_post_id', 9001)->firstOrFail();
-        $this->assertSame(1, $post->floor_number);
+        $this->assertSame(0, $post->floor_number);
         $this->assertSame('<strong>Hello</strong>', $post->content_html);
     }
 
@@ -121,7 +121,7 @@ class NgaLiteCrawlerTest extends TestCase
         $firstChangeAt = $thread->last_detected_change_at;
         $this->assertNotNull($firstCrawledAt);
         $this->assertNotNull($firstChangeAt);
-        $this->assertSame(2, $thread->crawl_cursor_max_floor_number);
+        $this->assertSame(1, $thread->crawl_cursor_max_floor_number);
         $this->assertSame(9002, $thread->crawl_cursor_max_source_post_id);
 
         CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-01-19 12:10:00', 'Asia/Shanghai'));
@@ -141,7 +141,7 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(2, count($client->threadCalls));
         $thread->refresh();
         $this->assertSame(3, Post::count());
-        $this->assertSame(3, $thread->crawl_cursor_max_floor_number);
+        $this->assertSame(2, $thread->crawl_cursor_max_floor_number);
         $this->assertSame(9003, $thread->crawl_cursor_max_source_post_id);
         $this->assertTrue($thread->last_crawled_at->gt($firstCrawledAt));
         $this->assertTrue($thread->last_detected_change_at->gt($firstChangeAt));

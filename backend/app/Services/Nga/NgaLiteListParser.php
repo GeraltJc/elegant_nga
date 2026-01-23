@@ -91,7 +91,7 @@ class NgaLiteListParser
 
         $results = [];
         foreach ($rows as $row) {
-            $topicLink = $this->firstNode($xpath, ".//a[contains(@href,'read.php?tid=')]", $row);
+            $topicLink = $this->selectBestTopicLink($xpath, $row);
             if ($topicLink === null) {
                 continue;
             }
@@ -101,10 +101,7 @@ class NgaLiteListParser
                 continue;
             }
 
-            $title = $this->cleanText($topicLink->textContent);
-            if ($title === '') {
-                $title = $this->cleanText((string) $topicLink->getAttribute('title'));
-            }
+            $title = $this->extractTopicTitle($topicLink);
 
             $authorNode = $this->firstNode($xpath, ".//a[contains(@href,'uid=')]", $row);
             $authorId = $authorNode ? $this->extractUidFromHref($authorNode->getAttribute('href')) : null;
@@ -162,6 +159,63 @@ class NgaLiteListParser
         }
 
         return $matches[1];
+    }
+
+    private function selectBestTopicLink(DOMXPath $xpath, DOMNode $row): ?DOMNode
+    {
+        $nodes = $xpath->query(".//a[contains(@href,'read.php?tid=')]", $row);
+        if ($nodes === false || $nodes->length === 0) {
+            return null;
+        }
+
+        $bestNode = null;
+        $bestScore = -1;
+
+        foreach ($nodes as $node) {
+            if (!$node instanceof \DOMElement) {
+                continue;
+            }
+
+            $candidate = $this->extractTopicTitle($node);
+            if ($candidate === '') {
+                continue;
+            }
+
+            // 业务规则：标题通常是非纯数字，优先选出“最长的非数字标题”
+            $score = ($this->isNumericText($candidate) ? 0 : 100) + $this->stringLength($candidate);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestNode = $node;
+            }
+        }
+
+        return $bestNode ?? $nodes->item(0);
+    }
+
+    private function extractTopicTitle(\DOMElement $node): string
+    {
+        $text = $this->cleanText($node->textContent);
+        $titleAttr = $this->cleanText($node->getAttribute('title'));
+
+        if ($text !== '' && !$this->isNumericText($text)) {
+            return $text;
+        }
+
+        if ($titleAttr !== '' && !$this->isNumericText($titleAttr)) {
+            return $titleAttr;
+        }
+
+        return $text !== '' ? $text : $titleAttr;
+    }
+
+    private function isNumericText(string $text): bool
+    {
+        return preg_match('/^\d+$/', $text) === 1;
+    }
+
+    private function stringLength(string $text): int
+    {
+        return function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
     }
 
     private function stringValue(array $data, array $keys, ?string $default = ''): string

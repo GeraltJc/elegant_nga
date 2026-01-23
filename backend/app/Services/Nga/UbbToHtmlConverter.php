@@ -19,6 +19,7 @@ class UbbToHtmlConverter
     public function convert(string $input): string
     {
         $input = $this->normalizeLineBreaks($input);
+        $input = trim($input);
 
         return $this->convertSegment($input);
     }

@@ -15,7 +15,7 @@ class NgaLiteThreadParser
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>}
+     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
      */
     public function parse(string $raw): array
     {
@@ -27,7 +27,7 @@ class NgaLiteThreadParser
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>}
+     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
      */
     private function parseJson(string $raw): array
     {
@@ -59,6 +59,14 @@ class NgaLiteThreadParser
             $sourceThreadId = $this->intValue($threadMeta, ['tid', 'thread_id', 'id'], 0);
         }
 
+        $threadTitle = '';
+        if (is_array($threadMeta)) {
+            $threadTitle = $this->stringValue($threadMeta, ['subject', 'title', 'thread_title', 'thread_subject']);
+        }
+        if ($threadTitle === '') {
+            $threadTitle = $this->stringValue($payload['data'] ?? $payload, ['subject', 'title'], '');
+        }
+
         $users = $payload['data']['__U'] ?? $payload['__U'] ?? [];
 
         $resultPosts = [];
@@ -75,7 +83,9 @@ class NgaLiteThreadParser
 
             $floor = $this->intValue($post, ['floor', 'floor_number'], null);
             if ($floor === null && array_key_exists('lou', $post)) {
-                $floor = ((int) $post['lou']) + 1;
+                $floor = (int) $post['lou'];
+            } elseif ($floor !== null && $floor > 0) {
+                $floor = $floor - 1;
             }
 
             $sourcePostId = $this->intValue($post, ['pid', 'post_id', 'source_post_id'], 0);
@@ -105,11 +115,12 @@ class NgaLiteThreadParser
             'page' => $page,
             'page_total' => $pageTotal,
             'posts' => $resultPosts,
+            'thread_title' => $threadTitle,
         ];
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>}
+     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
      */
     private function parseHtml(string $raw): array
     {
@@ -122,6 +133,7 @@ class NgaLiteThreadParser
 
         $sourceThreadId = $this->extractThreadId($html);
         [$page, $pageTotal] = $this->extractPageMeta($html);
+        $threadTitle = $this->extractThreadTitleFromHtml($xpath);
 
         $rows = $xpath->query("//tr[contains(@class,'postrow')]");
         if ($rows === false || $rows->length === 0) {
@@ -148,7 +160,7 @@ class NgaLiteThreadParser
 
             $floor = $this->extractFloorFromRow($xpath, $row);
             if ($floor === null) {
-                $floor = $rowIndex;
+                $floor = max(0, $rowIndex - 1);
             }
 
             $sourcePostId = $this->extractPidFromRow($row);
@@ -182,6 +194,7 @@ class NgaLiteThreadParser
             'page' => $page,
             'page_total' => $pageTotal,
             'posts' => $resultPosts,
+            'thread_title' => $threadTitle,
         ];
     }
 
@@ -444,7 +457,7 @@ class NgaLiteThreadParser
                 foreach (['name', 'id'] as $attr) {
                     $value = $anchor->getAttribute($attr);
                     if ($value !== '' && preg_match('/\\bl(\\d+)\\b/', $value, $matches) === 1) {
-                        return ((int) $matches[1]) + 1;
+                        return (int) $matches[1];
                     }
                 }
             }
@@ -452,7 +465,9 @@ class NgaLiteThreadParser
 
         $floorNode = $this->firstNode($xpath, ".//*[contains(@class,'postnum') or contains(@class,'floor')]", $row);
         if ($floorNode !== null && preg_match('/\\d+/', $floorNode->textContent, $matches) === 1) {
-            return (int) $matches[0];
+            $floor = (int) $matches[0];
+
+            return $floor > 0 ? ($floor - 1) : $floor;
         }
 
         return null;
@@ -470,6 +485,23 @@ class NgaLiteThreadParser
         }
 
         return (int) $matches[1];
+    }
+
+    private function extractThreadTitleFromHtml(DOMXPath $xpath): string
+    {
+        $titleNode = $xpath->query('//title')?->item(0);
+        if ($titleNode === null) {
+            return '';
+        }
+
+        $title = $this->cleanText($titleNode->textContent);
+        if ($title === '') {
+            return '';
+        }
+
+        $title = preg_replace('/\\s*-\\s*NGA.*$/u', '', $title) ?? $title;
+
+        return trim($title);
     }
 
     private function innerHtml(DOMNode $node): string

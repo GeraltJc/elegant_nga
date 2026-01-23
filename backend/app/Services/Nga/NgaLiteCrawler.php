@@ -23,11 +23,20 @@ class NgaLiteCrawler
     /**
      * @return array{threads:int, posts:int}
      */
-    public function crawlForum(int $fid, int $maxPostPages = 5, ?int $recentDays = 3, int $listPage = 1): array
+    public function crawlForum(
+        int $fid,
+        int $maxPostPages = 5,
+        ?int $recentDays = 3,
+        int $listPage = 1,
+        ?CarbonImmutable $windowStart = null,
+        ?CarbonImmutable $windowEnd = null
+    ): array
     {
         $now = CarbonImmutable::now('Asia/Shanghai');
-        $windowStart = $recentDays ? $now->startOfDay()->subDays($recentDays - 1) : null;
-        $windowEnd = $now->endOfDay();
+        if ($windowStart === null && $windowEnd === null) {
+            $windowStart = $recentDays ? $now->startOfDay()->subDays($recentDays - 1) : null;
+            $windowEnd = $recentDays ? $now->endOfDay() : null;
+        }
 
         $forum = Forum::firstOrCreate(
             ['source_forum_id' => $fid],
@@ -51,8 +60,11 @@ class NgaLiteCrawler
             }
 
             $createdAt = $threadData['thread_created_at'];
-            if ($windowStart && $createdAt instanceof CarbonImmutable) {
-                if ($createdAt->lt($windowStart) || $createdAt->gt($windowEnd)) {
+            if ($createdAt instanceof CarbonImmutable) {
+                if ($windowStart && $createdAt->lt($windowStart)) {
+                    continue;
+                }
+                if ($windowEnd && $createdAt->gt($windowEnd)) {
                     continue;
                 }
             }
@@ -111,6 +123,52 @@ class NgaLiteCrawler
     }
 
     /**
+     * @return array{thread:int, posts:int}
+     */
+    public function crawlSingleThread(int $tid, int $maxPostPages = 5, bool $force = false): array
+    {
+        $now = CarbonImmutable::now('Asia/Shanghai');
+        $thread = Thread::firstOrNew([
+            'source_thread_id' => $tid,
+        ]);
+
+        if (!$thread->exists) {
+            $thread->forum_id = $this->getOrCreateForumId();
+            $thread->thread_created_at = $now;
+            $thread->author_name = 'unknown';
+            $thread->title = (string) $tid;
+        }
+
+        if ($force) {
+            // 强制重抓：清空游标与截断标记，确保从第一页重新处理
+            $thread->crawl_cursor_max_floor_number = null;
+            $thread->crawl_cursor_max_source_post_id = null;
+            $thread->crawl_backfill_next_page_number = null;
+            $thread->is_truncated_by_page_limit = false;
+            $thread->truncated_at_page_number = null;
+            $thread->is_skipped_by_page_total_limit = false;
+            $thread->skipped_by_page_total_limit_at = null;
+        }
+
+        $thread->save();
+
+        if (!$force) {
+            $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
+        }
+
+        if (!$force && $thread->is_skipped_by_page_total_limit) {
+            return ['thread' => 0, 'posts' => 0];
+        }
+
+        $result = $this->crawlThreadSegment($thread, 1, $maxPostPages, $now);
+
+        return [
+            'thread' => 1,
+            'posts' => $result['posts'],
+        ];
+    }
+
+    /**
      * @return array{posts:int}
      */
     /**
@@ -121,8 +179,8 @@ class NgaLiteCrawler
         $page = max(1, $startPage);
         $pageTotal = 1;
         $postsUpserted = 0;
-        $maxFloor = $thread->crawl_cursor_max_floor_number ?? 0;
-        $maxPid = $thread->crawl_cursor_max_source_post_id ?? 0;
+        $maxFloor = $thread->crawl_cursor_max_floor_number;
+        $maxPid = $thread->crawl_cursor_max_source_post_id;
         $endPageFetched = null;
 
         $pageLimitEnd = $page + max(1, $maxPostPages) - 1;
@@ -132,6 +190,13 @@ class NgaLiteCrawler
             $pageTotal = max($pageTotal, (int) $pageData['page_total']);
 
             $thread->crawl_page_total_last_seen = $pageTotal;
+            $threadTitle = trim((string) ($pageData['thread_title'] ?? ''));
+            if ($this->shouldUpdateThreadTitle($thread->title, $threadTitle)) {
+                // 关键规则：仅在旧标题为空/纯数字时才用详情页标题纠正
+                $thread->title = $threadTitle;
+                $thread->title_prefix_text = $this->extractTitlePrefix($threadTitle);
+                $thread->title_last_changed_at = $now;
+            }
 
             // 超过页数上限的主题不抓取 posts，仅更新 threads 的列表字段与跳过标记
             if ($pageTotal > self::PAGE_TOTAL_SKIP_LIMIT) {
@@ -150,7 +215,7 @@ class NgaLiteCrawler
             foreach ($pageData['posts'] as $postData) {
                 $sourcePostId = (int) ($postData['source_post_id'] ?? 0);
                 $floorNumber = (int) ($postData['floor_number'] ?? 0);
-                if ($floorNumber <= 0) {
+                if ($floorNumber < 0) {
                     continue;
                 }
                 if ($sourcePostId <= 0) {
@@ -164,6 +229,9 @@ class NgaLiteCrawler
                 $content = (string) ($postData['content_raw'] ?? '');
                 $contentFormat = (string) ($postData['content_format'] ?? 'ubb');
                 $contentHtml = $this->contentProcessor->toSafeHtml($content, $contentFormat);
+                if ($floorNumber === 0 && $threadTitle !== '') {
+                    $contentHtml = $this->stripLeadingThreadTitle($contentHtml, $threadTitle);
+                }
                 $fingerprint = hash('sha256', $content);
 
                 $post = Post::firstOrNew([
@@ -198,8 +266,8 @@ class NgaLiteCrawler
                 $post->save();
                 $postsUpserted++;
 
-                $maxFloor = max($maxFloor, $floorNumber);
-                $maxPid = max($maxPid, $sourcePostId);
+                $maxFloor = $maxFloor === null ? $floorNumber : max($maxFloor, $floorNumber);
+                $maxPid = $maxPid === null ? $sourcePostId : max($maxPid, $sourcePostId);
             }
 
             $endPageFetched = $page;
@@ -215,8 +283,8 @@ class NgaLiteCrawler
 
         $thread->fill([
             'last_crawled_at' => $now,
-            'crawl_cursor_max_floor_number' => $maxFloor ?: null,
-            'crawl_cursor_max_source_post_id' => $maxPid ?: null,
+            'crawl_cursor_max_floor_number' => $maxFloor,
+            'crawl_cursor_max_source_post_id' => $maxPid,
             // 语义：当前是否仍未抓全（受“单次最多抓 N 页”限制）
             'is_truncated_by_page_limit' => $hasMorePages,
             // 记录本次抓取到的最后页码（绝对页码），用于排查与提示
@@ -284,14 +352,14 @@ class NgaLiteCrawler
         return $previous->format('Y-m-d H:i:s') !== $current->format('Y-m-d H:i:s');
     }
 
-    private function shouldSkipByCursor(int $floorNumber, int $sourcePostId, int $maxFloor, int $maxPid): bool
+    private function shouldSkipByCursor(int $floorNumber, int $sourcePostId, ?int $maxFloor, ?int $maxPid): bool
     {
         // 只抓“新增楼层”口径：任一游标命中即可跳过（避免重复写入与唯一约束冲突）
-        if ($maxFloor > 0) {
+        if ($maxFloor !== null) {
             return $floorNumber <= $maxFloor;
         }
 
-        if ($maxPid > 0) {
+        if ($maxPid !== null) {
             return $sourcePostId <= $maxPid;
         }
 
@@ -301,6 +369,91 @@ class NgaLiteCrawler
     private function defaultListUrl(int $fid): string
     {
         // 访客模式不走 lite=js
-        return "https://nga.178.com/thread.php?fid={$fid}";
+        return "https://nga.178.com/thread.php?fid={$fid}&order_by=postdatedesc";
+    }
+
+    private function getOrCreateForumId(): int
+    {
+        $forum = Forum::firstOrCreate(
+            ['source_forum_id' => 7],
+            [
+                'forum_name' => null,
+                'list_url' => $this->defaultListUrl(7),
+                'crawl_page_limit' => 5,
+                'request_rate_limit_per_sec' => 1.00,
+            ]
+        );
+
+        return (int) $forum->id;
+    }
+
+    private function shouldUpdateThreadTitle(?string $current, string $candidate): bool
+    {
+        if ($candidate === '' || $this->isNumericText($candidate)) {
+            return false;
+        }
+
+        $currentTitle = $current ?? '';
+        if ($currentTitle === '' || $this->isNumericText($currentTitle)) {
+            return true;
+        }
+
+        return $currentTitle !== $candidate;
+    }
+
+    private function isNumericText(string $text): bool
+    {
+        return preg_match('/^\d+$/', $text) === 1;
+    }
+
+    private function extractTitlePrefix(string $title): ?string
+    {
+        if (preg_match('/^\[(.+?)]/', $title, $matches) !== 1) {
+            return null;
+        }
+
+        return $matches[1];
+    }
+
+    private function stripLeadingThreadTitle(string $html, string $threadTitle): string
+    {
+        if ($html === '' || $threadTitle === '') {
+            return $html;
+        }
+
+        $normalizedTitle = trim(preg_replace('/\\s+/', ' ', $threadTitle) ?? $threadTitle);
+        $titleCandidates = [$normalizedTitle];
+        $titleWithoutTrailingNumber = preg_replace('/\\s*\\d+\\s*$/u', '', $normalizedTitle);
+        if ($titleWithoutTrailingNumber !== null && $titleWithoutTrailingNumber !== $normalizedTitle) {
+            $titleCandidates[] = trim($titleWithoutTrailingNumber);
+        }
+
+        // 关键规则：0 楼正文不应重复主题标题（标题应仅存 threads.title）
+        $patterns = [];
+        foreach ($titleCandidates as $candidate) {
+            if ($candidate === '') {
+                continue;
+            }
+            $patterns[] = preg_quote($candidate, '/');
+            $patterns[] = preg_quote(htmlspecialchars($candidate, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'), '/');
+        }
+        $patterns = array_values(array_unique($patterns));
+
+        foreach ($patterns as $titlePattern) {
+            if ($titlePattern === '') {
+                continue;
+            }
+
+            $pattern = '/^\s*(?:<br\s*\/?>\s*)*'.$titlePattern.'(?:\s*<br\s*\/?>\s*)*/iu';
+            if (preg_match($pattern, $html) === 1) {
+                $html = preg_replace($pattern, '', $html, 1) ?? $html;
+                break;
+            }
+        }
+
+        // 再清理一次首部 <br>，避免残留空行
+        $html = preg_replace('/^(?:\s*<br\s*\/?>\s*)+/i', '', $html) ?? $html;
+
+        return $html;
     }
 }
