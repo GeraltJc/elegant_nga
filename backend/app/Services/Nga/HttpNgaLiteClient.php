@@ -2,6 +2,8 @@
 
 namespace App\Services\Nga;
 
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -10,6 +12,10 @@ use RuntimeException;
 class HttpNgaLiteClient implements NgaLiteClient
 {
     private const BASE_URL = 'https://nga.178.com';
+    private const DEFAULT_CONNECT_TIMEOUT = 5.0;
+    private const DEFAULT_TIMEOUT = 20.0;
+    private const DEFAULT_RETRY_TIMES = 3;
+    private const DEFAULT_RETRY_DELAY_MS = 200;
 
     private ?string $guestJs = null;
     private ?string $lastVisit = null;
@@ -70,6 +76,14 @@ class HttpNgaLiteClient implements NgaLiteClient
             'order_by' => 'postdatedesc',
         ], false);
 
+        if ($this->isGuestBlocked($response)) {
+            // 被拦截时，刷新一次访客请求再尝试获取 cookie
+            $response = $this->request('thread.php', [
+                'fid' => $this->forumId,
+                'order_by' => 'postdatedesc',
+            ], false);
+        }
+
         $guestJs = $this->extractGuestJs($response->body());
         $lastVisit = $this->extractCookieValue($response, 'lastvisit');
 
@@ -86,7 +100,39 @@ class HttpNgaLiteClient implements NgaLiteClient
         $query['rand'] = $this->randomRand();
 
         $headers = $this->defaultHeaders();
-        $http = Http::withHeaders($headers);
+        $http = Http::withHeaders($headers)
+            ->connectTimeout($this->resolveConnectTimeout())
+            ->timeout($this->resolveTimeout())
+            ->retry(
+                $this->resolveRetryTimes(),
+                $this->resolveRetryDelayMs(),
+                function ($exception) {
+                    if ($exception instanceof ConnectionException) {
+                        return true;
+                    }
+
+                    if ($exception instanceof RequestException) {
+                        $status = $exception->response?->status();
+                        if ($status === null) {
+                            return true;
+                        }
+
+                        return $status === 408 || $status === 429 || $status >= 500;
+                    }
+
+                    return false;
+                },
+                // 关键规则：不在失败响应时抛异常，确保 403 场景仍能解析访客 cookie
+                false
+            );
+
+        if ($this->shouldForceIpv4()) {
+            $http = $http->withOptions([
+                'curl' => [
+                    CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+                ],
+            ]);
+        }
         if ($withCookies && $this->guestJs !== null && $this->lastVisit !== null) {
             // 访客身份通过 cookie 维持
             $http = $http->withCookies([
@@ -96,6 +142,8 @@ class HttpNgaLiteClient implements NgaLiteClient
         }
 
         $url = $this->buildUrl($path);
+        // 记录完整 curl，便于回放定位拦截/访问异常
+        $this->logCurlCommand($url, $query, $headers, $withCookies);
         $start = microtime(true);
 
         try {
@@ -193,5 +241,114 @@ class HttpNgaLiteClient implements NgaLiteClient
         }
 
         return null;
+    }
+
+    private function resolveConnectTimeout(): float
+    {
+        return $this->normalizePositiveFloat(env('NGA_HTTP_CONNECT_TIMEOUT', self::DEFAULT_CONNECT_TIMEOUT), self::DEFAULT_CONNECT_TIMEOUT);
+    }
+
+    private function resolveTimeout(): float
+    {
+        return $this->normalizePositiveFloat(env('NGA_HTTP_TIMEOUT', self::DEFAULT_TIMEOUT), self::DEFAULT_TIMEOUT);
+    }
+
+    private function resolveRetryTimes(): int
+    {
+        return $this->normalizePositiveInt(env('NGA_HTTP_RETRY_TIMES', self::DEFAULT_RETRY_TIMES), self::DEFAULT_RETRY_TIMES);
+    }
+
+    private function resolveRetryDelayMs(): int
+    {
+        return $this->normalizeNonNegativeInt(env('NGA_HTTP_RETRY_DELAY_MS', self::DEFAULT_RETRY_DELAY_MS), self::DEFAULT_RETRY_DELAY_MS);
+    }
+
+    private function shouldForceIpv4(): bool
+    {
+        $value = env('NGA_FORCE_IPV4');
+        if ($value === null) {
+            return false;
+        }
+
+        $bool = filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+
+        return $bool ?? false;
+    }
+
+    private function normalizePositiveFloat(mixed $value, float $fallback): float
+    {
+        if (is_numeric($value)) {
+            $number = (float) $value;
+            if ($number > 0) {
+                return $number;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function normalizePositiveInt(mixed $value, int $fallback): int
+    {
+        if (is_numeric($value)) {
+            $number = (int) $value;
+            if ($number > 0) {
+                return $number;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function normalizeNonNegativeInt(mixed $value, int $fallback): int
+    {
+        if (is_numeric($value)) {
+            $number = (int) $value;
+            if ($number >= 0) {
+                return $number;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function logCurlCommand(string $url, array $query, array $headers, bool $withCookies): void
+    {
+        $command = $this->buildCurlCommand($url, $query, $headers, $withCookies);
+        $logPath = $this->resolveCurlLogPath();
+        if ($logPath !== null) {
+            // 辅助排查：按请求顺序追加记录
+            @file_put_contents($logPath, $command.PHP_EOL, FILE_APPEND);
+        }
+        Log::info('NGA curl command', ['command' => $command]);
+    }
+
+    private function buildCurlCommand(string $url, array $query, array $headers, bool $withCookies): string
+    {
+        $queryString = http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+        $fullUrl = $queryString === '' ? $url : $url.'?'.$queryString;
+
+        $parts = ['curl '.escapeshellarg($fullUrl)];
+
+        if ($withCookies && $this->guestJs !== null && $this->lastVisit !== null) {
+            $cookie = 'lastvisit='.$this->lastVisit.'; guestJs='.$this->guestJs;
+            $parts[] = '-b '.escapeshellarg($cookie);
+        }
+
+        foreach ($headers as $name => $value) {
+            $parts[] = '-H '.escapeshellarg($name.': '.$value);
+        }
+
+        return implode(" \\\n  ", $parts);
+    }
+
+    private function resolveCurlLogPath(): ?string
+    {
+        $path = (string) env('NGA_CURL_LOG_PATH', storage_path('logs/nga-curl.log'));
+        if ($path === '') {
+            // 空字符串表示禁用 curl 日志落盘
+            return null;
+        }
+
+        return $path;
     }
 }
