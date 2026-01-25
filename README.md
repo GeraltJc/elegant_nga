@@ -36,6 +36,8 @@ php artisan key:generate
 php artisan migrate
 ```
 
+说明：后端不再依赖 Node（不包含 backend/package.json/Vite）。Node 仅用于 frontend。
+
 ### 3) 初始化前端（Vue 3 + Vite）
 
 Docker 方式：
