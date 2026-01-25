@@ -273,6 +273,94 @@ a {
   word-break: break-word;
 }
 
+.post-history {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.post-history-toggle {
+  margin-left: auto;
+}
+
+.revision-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+}
+
+.revision-state {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.revision-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.revision-item {
+  background: #fff;
+  border-radius: 10px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+}
+
+.revision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.revision-reason {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.revision-content {
+  margin-top: 10px;
+  line-height: 1.7;
+  color: #111827;
+  word-break: break-word;
+}
+
+.revision-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+.revision-content blockquote {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #f3f4f6;
+  border-radius: 8px;
+}
+
+.revision-content pre {
+  background: #111827;
+  color: #f9fafb;
+  padding: 12px;
+  border-radius: 8px;
+  overflow: auto;
+}
+
+.revision-content a {
+  color: #2563eb;
+}
+
+.revision-more {
+  align-self: flex-start;
+}
+
 .post-content img {
   max-width: 100%;
   height: auto;

@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Post;
+use App\Models\PostRevision;
 use App\Models\Thread;
 use App\Services\Nga\FixtureNgaLiteClient;
 use App\Services\Nga\NgaLiteClient;
@@ -16,10 +17,19 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use RuntimeException;
 use Tests\TestCase;
 
+/**
+ * 抓取器集成测试，覆盖增量逻辑与历史版本写入。
+ */
 class NgaLiteCrawlerTest extends TestCase
 {
     use RefreshDatabase;
 
+    /**
+     * 验证夹具抓取能写入主题与楼层基础信息。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_crawl_with_fixtures_persists_threads_and_posts(): void
     {
         $crawler = $this->makeCrawler();
@@ -42,6 +52,12 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame('<strong>Hello</strong>', $post->content_html);
     }
 
+    /**
+     * 验证重复抓取不会产生重复记录。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_crawl_is_idempotent(): void
     {
         $crawler = $this->makeCrawler();
@@ -53,6 +69,190 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(3, Post::count());
     }
 
+    /**
+     * 验证楼层内容变化会写入历史版本（保存旧内容快照）。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
+    public function test_crawl_writes_revision_when_content_changes(): void
+    {
+        $listFirst = $this->makeListPayload(7, [[
+            'tid' => 7001,
+            'title' => 'Revision thread',
+            'author' => 'Alice',
+            'author_id' => 501,
+            'post_time' => '2026-01-19 10:00:00',
+            'last_reply' => '2026-01-19 10:00:00',
+            'reply_count' => 1,
+            'view_count' => 10,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+        $listChanged = $this->makeListPayload(7, [[
+            'tid' => 7001,
+            'title' => 'Revision thread',
+            'author' => 'Alice',
+            'author_id' => 501,
+            'post_time' => '2026-01-19 10:00:00',
+            'last_reply' => '2026-01-19 10:05:00',
+            'reply_count' => 1,
+            'view_count' => 12,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+
+        $postFirst = $this->makePostPayload(9101, 1, 'Alice', 501, '2026-01-19 10:00:00', 'Old content');
+        $postSecond = $this->makePostPayload(9101, 1, 'Alice', 501, '2026-01-19 10:00:00', 'New content');
+
+        $threadFirst = $this->makeThreadPayload(7001, 1, 1, [$postFirst]);
+        $threadSecond = $this->makeThreadPayload(7001, 1, 1, [$postSecond]);
+
+        $client = new SequenceNgaLiteClient([$listFirst, $listChanged], [
+            7001 => [
+                1 => [$threadFirst, $threadSecond],
+            ],
+        ]);
+        $crawler = $this->makeCrawler($client);
+
+        $crawler->crawlForum(7, 5, null, 1);
+        $post = Post::where('source_post_id', 9101)->firstOrFail();
+        $originalContent = $post->content_html;
+
+        $this->assertSame(0, PostRevision::count());
+
+        $crawler->crawlForum(7, 5, null, 1);
+
+        $this->assertSame(1, PostRevision::count());
+        $revision = PostRevision::firstOrFail();
+        $this->assertSame($originalContent, $revision->content_html);
+        $this->assertSame('content_fingerprint_changed', $revision->change_detected_reason);
+    }
+
+    /**
+     * 验证删除状态变化会写入历史版本。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
+    public function test_crawl_writes_revision_when_deleted_flag_changes(): void
+    {
+        $listFirst = $this->makeListPayload(7, [[
+            'tid' => 7002,
+            'title' => 'Deleted thread',
+            'author' => 'Bob',
+            'author_id' => 502,
+            'post_time' => '2026-01-19 11:00:00',
+            'last_reply' => '2026-01-19 11:00:00',
+            'reply_count' => 1,
+            'view_count' => 10,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+        $listChanged = $this->makeListPayload(7, [[
+            'tid' => 7002,
+            'title' => 'Deleted thread',
+            'author' => 'Bob',
+            'author_id' => 502,
+            'post_time' => '2026-01-19 11:00:00',
+            'last_reply' => '2026-01-19 11:10:00',
+            'reply_count' => 1,
+            'view_count' => 11,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+
+        $postFirst = $this->makePostPayload(9201, 1, 'Bob', 502, '2026-01-19 11:00:00', 'Same content');
+        $postSecond = $this->makePostPayload(9201, 1, 'Bob', 502, '2026-01-19 11:00:00', 'Same content', 1, 0);
+
+        $threadFirst = $this->makeThreadPayload(7002, 1, 1, [$postFirst]);
+        $threadSecond = $this->makeThreadPayload(7002, 1, 1, [$postSecond]);
+
+        $client = new SequenceNgaLiteClient([$listFirst, $listChanged], [
+            7002 => [
+                1 => [$threadFirst, $threadSecond],
+            ],
+        ]);
+        $crawler = $this->makeCrawler($client);
+
+        $crawler->crawlForum(7, 5, null, 1);
+        $this->assertSame(0, PostRevision::count());
+
+        $crawler->crawlForum(7, 5, null, 1);
+
+        $this->assertSame(1, PostRevision::count());
+        $revision = PostRevision::firstOrFail();
+        $this->assertSame('marked_deleted_by_source', $revision->change_detected_reason);
+
+        $post = Post::where('source_post_id', 9201)->firstOrFail();
+        $this->assertTrue($post->is_deleted_by_source);
+    }
+
+    /**
+     * 验证折叠状态变化会写入历史版本。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
+    public function test_crawl_writes_revision_when_folded_flag_changes(): void
+    {
+        $listFirst = $this->makeListPayload(7, [[
+            'tid' => 7003,
+            'title' => 'Folded thread',
+            'author' => 'Cara',
+            'author_id' => 503,
+            'post_time' => '2026-01-19 12:00:00',
+            'last_reply' => '2026-01-19 12:00:00',
+            'reply_count' => 1,
+            'view_count' => 10,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+        $listChanged = $this->makeListPayload(7, [[
+            'tid' => 7003,
+            'title' => 'Folded thread',
+            'author' => 'Cara',
+            'author_id' => 503,
+            'post_time' => '2026-01-19 12:00:00',
+            'last_reply' => '2026-01-19 12:10:00',
+            'reply_count' => 1,
+            'view_count' => 11,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+
+        $postFirst = $this->makePostPayload(9301, 1, 'Cara', 503, '2026-01-19 12:00:00', 'Same content');
+        $postSecond = $this->makePostPayload(9301, 1, 'Cara', 503, '2026-01-19 12:00:00', 'Same content', 0, 1);
+
+        $threadFirst = $this->makeThreadPayload(7003, 1, 1, [$postFirst]);
+        $threadSecond = $this->makeThreadPayload(7003, 1, 1, [$postSecond]);
+
+        $client = new SequenceNgaLiteClient([$listFirst, $listChanged], [
+            7003 => [
+                1 => [$threadFirst, $threadSecond],
+            ],
+        ]);
+        $crawler = $this->makeCrawler($client);
+
+        $crawler->crawlForum(7, 5, null, 1);
+        $this->assertSame(0, PostRevision::count());
+
+        $crawler->crawlForum(7, 5, null, 1);
+
+        $this->assertSame(1, PostRevision::count());
+        $revision = PostRevision::firstOrFail();
+        $this->assertSame('marked_folded_by_source', $revision->change_detected_reason);
+
+        $post = Post::where('source_post_id', 9301)->firstOrFail();
+        $this->assertTrue($post->is_folded_by_source);
+    }
+
+    /**
+     * 验证 last_reply_at 变化驱动增量抓取与游标推进。
+     *
+     * @return void
+     * 副作用：读写测试数据库，覆盖时间流转。
+     */
     public function test_incremental_crawl_uses_last_reply_at_and_cursor(): void
     {
         CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-01-19 12:00:00', 'Asia/Shanghai'));
@@ -149,6 +349,12 @@ class NgaLiteCrawlerTest extends TestCase
         CarbonImmutable::setTestNow();
     }
 
+    /**
+     * 验证超出单次页上限时会标记截断并写入游标。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_crawl_marks_truncated_when_exceed_page_limit(): void
     {
         $listPayload = $this->makeListPayload(7, [[
@@ -188,6 +394,12 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(5, Post::count());
     }
 
+    /**
+     * 验证未变化的主题也能跨多次补齐抓取。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_backfill_crawls_all_pages_across_multiple_runs_even_without_last_reply_change(): void
     {
         $listPayload = $this->makeListPayload(7, [[
@@ -239,6 +451,12 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(12, count($client->threadCalls));
     }
 
+    /**
+     * 验证主题页数超过上限时跳过详情抓取。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_skip_crawling_posts_when_page_total_exceeds_1000(): void
     {
         $listPayload = $this->makeListPayload(7, [[
@@ -276,6 +494,12 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(0, Post::count());
     }
 
+    /**
+     * 验证 last_reply_at 变化时能继续补齐后续分页直至完成。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
     public function test_incremental_crawl_backfills_new_pages_until_complete_when_last_reply_changes(): void
     {
         $listOld = $this->makeListPayload(7, [[
@@ -360,6 +584,13 @@ class NgaLiteCrawlerTest extends TestCase
         $this->assertSame(25, count($client->threadCalls));
     }
 
+    /**
+     * 构造抓取器实例并注入测试用客户端。
+     *
+     * @param NgaLiteClient|null $client 自定义客户端（可选）
+     * @return NgaLiteCrawler
+     * 无副作用。
+     */
     private function makeCrawler(?NgaLiteClient $client = null): NgaLiteCrawler
     {
         $fixturePath = base_path('tests/Fixtures/nga');
@@ -373,7 +604,12 @@ class NgaLiteCrawlerTest extends TestCase
     }
 
     /**
-     * @param array<int, array<string, mixed>> $threads
+     * 构造列表接口的 JSON 夹具。
+     *
+     * @param int $fid 版块 fid
+     * @param array<int, array<string, mixed>> $threads 主题列表数据
+     * @return string JSON 字符串
+     * 无副作用。
      */
     private function makeListPayload(int $fid, array $threads): string
     {
@@ -384,7 +620,14 @@ class NgaLiteCrawlerTest extends TestCase
     }
 
     /**
-     * @param array<int, array<string, mixed>> $posts
+     * 构造详情接口的 JSON 夹具。
+     *
+     * @param int $tid 主题 tid
+     * @param int $page 当前页码
+     * @param int $pageTotal 总页数
+     * @param array<int, array<string, mixed>> $posts 楼层数组
+     * @return string JSON 字符串
+     * 无副作用。
      */
     private function makeThreadPayload(int $tid, int $page, int $pageTotal, array $posts): string
     {
@@ -397,7 +640,19 @@ class NgaLiteCrawlerTest extends TestCase
     }
 
     /**
+     * 构造楼层数据数组。
+     *
+     * @param int $pid pid
+     * @param int $floor 楼层号（测试输入按 1 基）
+     * @param string $author 作者名
+     * @param int $authorId 作者 uid
+     * @param string $postTime 发帖时间
+     * @param string $content 原始内容
+     * @param int $isDeleted 删除标记（0/1）
+     * @param int $isFolded 折叠标记（0/1）
+     * @param string|null $editedAt 来源编辑时间
      * @return array<string, mixed>
+     * 无副作用。
      */
     private function makePostPayload(
         int $pid,
@@ -405,7 +660,10 @@ class NgaLiteCrawlerTest extends TestCase
         string $author,
         int $authorId,
         string $postTime,
-        string $content
+        string $content,
+        int $isDeleted = 0,
+        int $isFolded = 0,
+        ?string $editedAt = null
     ): array {
         return [
             'pid' => $pid,
@@ -414,14 +672,20 @@ class NgaLiteCrawlerTest extends TestCase
             'author_id' => $authorId,
             'post_time' => $postTime,
             'content' => $content,
-            'is_deleted' => 0,
-            'is_folded' => 0,
-            'edited_at' => null,
+            'is_deleted' => $isDeleted,
+            'is_folded' => $isFolded,
+            'edited_at' => $editedAt,
         ];
     }
 
     /**
+     * 构造分页队列夹具，模拟多页主题抓取。
+     *
+     * @param int $tid 主题 tid
+     * @param int $pageTotal 总页数
+     * @param int $pidBase pid 基数
      * @return array<int, array<int, string>>
+     * 无副作用。
      */
     private function makePagedThreadQueues(int $tid, int $pageTotal, int $pidBase): array
     {
@@ -438,6 +702,9 @@ class NgaLiteCrawlerTest extends TestCase
     }
 }
 
+/**
+ * 顺序队列客户端，用于按测试脚本顺序返回固定数据。
+ */
 class SequenceNgaLiteClient implements NgaLiteClient
 {
     /**
@@ -456,8 +723,11 @@ class SequenceNgaLiteClient implements NgaLiteClient
     public array $threadCalls = [];
 
     /**
-     * @param array<int, string> $listQueue
-     * @param array<int, array<int, array<int, string>>> $threadQueues
+     * 构造顺序队列客户端。
+     *
+     * @param array<int, string> $listQueue 列表返回队列
+     * @param array<int, array<int, array<int, string>>> $threadQueues 主题详情返回队列
+     * 无副作用。
      */
     public function __construct(array $listQueue, array $threadQueues)
     {
@@ -465,11 +735,27 @@ class SequenceNgaLiteClient implements NgaLiteClient
         $this->threadQueues = $threadQueues;
     }
 
+    /**
+     * 返回列表页数据并从队列出队。
+     *
+     * @param int $fid 版块 fid
+     * @param int $page 页码
+     * @return string JSON 负载
+     * 副作用：消耗队列元素。
+     */
     public function fetchList(int $fid, int $page = 1): string
     {
         return $this->shiftQueue($this->listQueue, "list:{$fid}:{$page}");
     }
 
+    /**
+     * 返回主题详情数据并从队列出队。
+     *
+     * @param int $tid 主题 tid
+     * @param int $page 页码
+     * @return string JSON 负载
+     * 副作用：记录调用轨迹并消耗队列元素。
+     */
     public function fetchThread(int $tid, int $page = 1): string
     {
         $this->threadCalls[] = ['tid' => $tid, 'page' => $page];
@@ -477,6 +763,15 @@ class SequenceNgaLiteClient implements NgaLiteClient
         return $this->shiftThreadQueue($tid, $page);
     }
 
+    /**
+     * 从指定主题页码队列中取出一个返回值。
+     *
+     * @param int $tid 主题 tid
+     * @param int $page 页码
+     * @return string JSON 负载
+     * @throws RuntimeException 队列缺失时抛出
+     * 副作用：消耗队列元素。
+     */
     private function shiftThreadQueue(int $tid, int $page): string
     {
         if (!isset($this->threadQueues[$tid][$page])) {
@@ -489,7 +784,13 @@ class SequenceNgaLiteClient implements NgaLiteClient
     }
 
     /**
-     * @param array<int, string> $queue
+     * 通用出队方法。
+     *
+     * @param array<int, string> $queue 队列引用
+     * @param string $label 队列标签
+     * @return string 队列值
+     * @throws RuntimeException 队列为空或值非法时抛出
+     * 副作用：消耗队列元素。
      */
     private function shiftQueue(array &$queue, string $label): string
     {

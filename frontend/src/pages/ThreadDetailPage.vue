@@ -3,8 +3,10 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   fetchThread,
+  fetchPostRevisions,
   fetchThreadPosts,
   type ApiMeta,
+  type PostRevision,
   type ThreadDetail,
   type ThreadPost,
 } from '../lib/api'
@@ -24,8 +26,23 @@ const postsError = ref('')
 
 const currentPage = ref(1)
 const perPage = 30
+const revisionPerPage = 5
 const imageBaseUrl = 'https://img.nga.178.com/attachments'
 
+type RevisionState = {
+  open: boolean
+  loading: boolean
+  error: string
+  page: number
+  meta: ApiMeta | null
+  data: PostRevision[]
+}
+
+const revisionStates = ref<Record<number, RevisionState>>({})
+
+/**
+ * 标准化图片地址，补齐附件域名。
+ */
 const normalizeImageSrc = (src: string) => {
   const trimmed = src.trim()
   if (trimmed === '') {
@@ -38,6 +55,9 @@ const normalizeImageSrc = (src: string) => {
   return `${imageBaseUrl}/${cleaned}`
 }
 
+/**
+ * 标准化楼层 HTML 内容，补齐图片地址与基础标签兼容处理。
+ */
 const normalizePostHtml = (html: string) => {
   let output = html
   output = output.replace(/\[img\]([\s\S]*?)\[\/img\]/gi, (_, rawSrc: string) => {
@@ -55,6 +75,9 @@ const normalizePostHtml = (html: string) => {
   return output
 }
 
+/**
+ * 解析分页参数，保证页码合法。
+ */
 const parsePage = (value: unknown): number => {
   const rawValue = Array.isArray(value) ? value[0] : value
   const parsed = Number.parseInt(typeof rawValue === 'string' ? rawValue : '1', 10)
@@ -70,6 +93,9 @@ const threadId = computed(() => {
   return Number.isNaN(parsed) ? null : parsed
 })
 
+/**
+ * 获取主题详情数据。
+ */
 const loadThread = async (id: number) => {
   loadingThread.value = true
   errorMessage.value = ''
@@ -84,9 +110,13 @@ const loadThread = async (id: number) => {
   }
 }
 
+/**
+ * 获取楼层列表，并重置历史版本状态。
+ */
 const loadPosts = async (id: number, page: number) => {
   loadingPosts.value = true
   postsError.value = ''
+  revisionStates.value = {}
   try {
     const response = await fetchThreadPosts(id, {
       page,
@@ -103,6 +133,93 @@ const loadPosts = async (id: number, page: number) => {
   }
 }
 
+/**
+ * 获取或初始化楼层历史版本状态。
+ */
+const getRevisionState = (postId: number): RevisionState => {
+  const existing = revisionStates.value[postId]
+  if (existing) {
+    return existing
+  }
+  const nextState: RevisionState = {
+    open: false,
+    loading: false,
+    error: '',
+    page: 1,
+    meta: null,
+    data: [],
+  }
+  revisionStates.value = {
+    ...revisionStates.value,
+    [postId]: nextState,
+  }
+  return nextState
+}
+
+/**
+ * 加载楼层历史版本列表（按时间倒序）。
+ */
+const loadPostRevisions = async (postId: number, page: number) => {
+  const state = getRevisionState(postId)
+  state.loading = true
+  state.error = ''
+  try {
+    const response = await fetchPostRevisions(postId, {
+      page,
+      per_page: revisionPerPage,
+    })
+    state.data = page === 1 ? response.data : [...state.data, ...response.data]
+    state.meta = response.meta
+    state.page = page
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : '加载失败'
+  } finally {
+    state.loading = false
+  }
+}
+
+/**
+ * 切换历史版本面板显示状态。
+ */
+const togglePostRevisions = async (postId: number) => {
+  const state = getRevisionState(postId)
+  state.open = !state.open
+  const shouldLoad = state.open && state.data.length === 0 && !state.loading
+  // 业务规则：首次展开时自动加载历史版本
+  if (shouldLoad) {
+    await loadPostRevisions(postId, 1)
+  }
+}
+
+/**
+ * 判断是否还能加载更多历史版本。
+ */
+const canLoadMoreRevisions = (state: RevisionState): boolean => {
+  if (!state.meta) {
+    return false
+  }
+  return state.meta.page < state.meta.total_pages
+}
+
+/**
+ * 将变更原因 token 转换为中文说明。
+ */
+const formatChangeReason = (reason: string): string => {
+  const mapping: Record<string, string> = {
+    content_fingerprint_changed: '内容变化',
+    marked_deleted_by_source: '标记删除',
+    marked_folded_by_source: '标记折叠',
+  }
+  return reason
+    .split(';')
+    .map((token) => mapping[token] || token)
+    .filter((token) => token !== '')
+    .join('、')
+}
+
+/**
+ * 跳转至指定页码。
+ */
 const goToPage = (page: number) => {
   router.push({
     path: `/threads/${threadId.value}`,
@@ -192,6 +309,64 @@ watch(
         </span>
       </header>
       <div class="post-content" v-html="normalizePostHtml(post.content_html)"></div>
+      <div class="post-history">
+        <span v-if="post.content_last_changed_at" class="post-history-time">
+          最近变更：{{ formatDateTime(post.content_last_changed_at) }}
+        </span>
+        <button
+          v-if="post.revision_count > 0"
+          class="link post-history-toggle"
+          type="button"
+          @click="togglePostRevisions(post.post_id)"
+        >
+          {{ getRevisionState(post.post_id).open ? '收起历史' : '历史版本' }}
+          ({{ post.revision_count }})
+        </button>
+      </div>
+      <div v-if="post.revision_count > 0 && getRevisionState(post.post_id).open" class="revision-panel">
+        <div v-if="getRevisionState(post.post_id).loading" class="revision-state">
+          加载历史版本中...
+        </div>
+        <div v-else-if="getRevisionState(post.post_id).error" class="revision-state error">
+          {{ getRevisionState(post.post_id).error }}
+          <button
+            class="button"
+            type="button"
+            @click="loadPostRevisions(post.post_id, getRevisionState(post.post_id).page)"
+          >
+            重试
+          </button>
+        </div>
+        <div v-else-if="getRevisionState(post.post_id).data.length === 0" class="revision-state">
+          暂无历史版本
+        </div>
+        <div v-else class="revision-list">
+          <article
+            v-for="revision in getRevisionState(post.post_id).data"
+            :key="`${revision.revision_created_at}-${revision.change_detected_reason}`"
+            class="revision-item"
+          >
+            <header class="revision-meta">
+              <span>变更：{{ formatDateTime(revision.revision_created_at) }}</span>
+              <span v-if="revision.source_edited_at">
+                源站编辑：{{ formatDateTime(revision.source_edited_at) }}
+              </span>
+              <span class="revision-reason">
+                {{ formatChangeReason(revision.change_detected_reason) }}
+              </span>
+            </header>
+            <div class="revision-content" v-html="normalizePostHtml(revision.content_html)"></div>
+          </article>
+          <button
+            v-if="canLoadMoreRevisions(getRevisionState(post.post_id))"
+            class="button revision-more"
+            type="button"
+            @click="loadPostRevisions(post.post_id, getRevisionState(post.post_id).page + 1)"
+          >
+            展开更多
+          </button>
+        </div>
+      </div>
     </article>
   </section>
 

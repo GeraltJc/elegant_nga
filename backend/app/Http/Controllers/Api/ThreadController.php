@@ -10,8 +10,18 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
+/**
+ * 主题相关接口控制器，负责列表、详情与楼层查询。
+ */
 class ThreadController extends Controller
 {
+    /**
+     * 获取主题列表（支持分页、排序与搜索）。
+     *
+     * @param Request $request 请求对象
+     * @return JsonResponse
+     * 副作用：读库。
+     */
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -99,6 +109,13 @@ class ThreadController extends Controller
         ]);
     }
 
+    /**
+     * 获取主题详情（不包含楼层列表）。
+     *
+     * @param int $sourceThreadId 主题 tid
+     * @return JsonResponse
+     * 副作用：读库。
+     */
     public function show(int $sourceThreadId): JsonResponse
     {
         $thread = Thread::query()
@@ -129,6 +146,14 @@ class ThreadController extends Controller
         ]);
     }
 
+    /**
+     * 获取指定主题的楼层列表（带分页）。
+     *
+     * @param Request $request 请求对象
+     * @param int $sourceThreadId 主题 tid
+     * @return JsonResponse
+     * 副作用：读库。
+     */
     public function posts(Request $request, int $sourceThreadId): JsonResponse
     {
         $validated = $request->validate([
@@ -149,17 +174,21 @@ class ThreadController extends Controller
 
         $paginator = Post::query()
             ->where('thread_id', $thread->id)
+            ->withCount('revisions')
             ->orderBy('floor_number')
             ->paginate($perPage, page: $page);
 
         $data = array_map(function (Post $post): array {
             return [
+                'post_id' => (int) $post->id,
                 'floor_number' => (int) $post->floor_number,
                 'author_name' => (string) $post->author_name,
                 'post_created_at' => $post->post_created_at?->setTimezone('Asia/Shanghai')->format('Y-m-d H:i:s'),
                 'content_html' => (string) $post->content_html,
                 'is_deleted_by_source' => (bool) $post->is_deleted_by_source,
                 'is_folded_by_source' => (bool) $post->is_folded_by_source,
+                'content_last_changed_at' => $post->content_last_changed_at?->setTimezone('Asia/Shanghai')->format('Y-m-d H:i:s'),
+                'revision_count' => isset($post->revisions_count) ? (int) $post->revisions_count : 0,
             ];
         }, $paginator->items());
 

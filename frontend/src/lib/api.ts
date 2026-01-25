@@ -34,12 +34,22 @@ export type ThreadSummary = {
 export type ThreadDetail = ThreadSummary
 
 export type ThreadPost = {
+  post_id: number
   floor_number: number
   author_name: string
   post_created_at: string | null
   content_html: string
   is_deleted_by_source: boolean
   is_folded_by_source: boolean
+  content_last_changed_at: string | null
+  revision_count: number
+}
+
+export type PostRevision = {
+  revision_created_at: string | null
+  source_edited_at: string | null
+  content_html: string
+  change_detected_reason: string
 }
 
 type QueryValue = string | number | boolean | null | undefined
@@ -91,3 +101,11 @@ export const fetchThreadPosts = (
   threadId: number,
   params?: { page?: number; per_page?: number }
 ): Promise<ApiListResponse<ThreadPost>> => requestJson(`/api/threads/${threadId}/posts`, params)
+
+/**
+ * 获取指定楼层的历史版本列表（按时间倒序）。
+ */
+export const fetchPostRevisions = (
+  postId: number,
+  params?: { page?: number; per_page?: number }
+): Promise<ApiListResponse<PostRevision>> => requestJson(`/api/posts/${postId}/revisions`, params)
