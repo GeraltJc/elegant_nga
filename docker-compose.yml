@@ -23,6 +23,20 @@ services:
     volumes:
       - ./backend:/var/www/backend
 
+  frontend:
+    build:
+      context: ./docker/frontend
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      VITE_DEV_PORT: "${FRONTEND_PORT:-5173}"
+      VITE_PROXY_TARGET: "http://nginx"
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/var/www/frontend
+      - frontend_node_modules:/var/www/frontend/node_modules
+    command: ["sh", "/usr/local/bin/entrypoint.sh"]
+
   mysql:
     image: mysql:8.0
     ports:
@@ -39,4 +53,4 @@ services:
 
 volumes:
   mysql_data:
-
+  frontend_node_modules:

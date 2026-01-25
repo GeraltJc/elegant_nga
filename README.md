@@ -38,6 +38,16 @@ php artisan migrate
 
 ### 3) 初始化前端（Vue 3 + Vite）
 
+Docker 方式：
+
+```bash
+docker compose up -d frontend
+```
+
+默认访问：`http://localhost:5173`（可用 `FRONTEND_PORT` 调整）
+
+本地方式：
+
 ```bash
 cd frontend
 npm i
