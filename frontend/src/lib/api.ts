@@ -52,6 +52,43 @@ export type PostRevision = {
   change_detected_reason: string
 }
 
+export type CrawlRunSummary = {
+  id: number
+  forum_id: number
+  run_started_at: string | null
+  run_finished_at: string | null
+  run_trigger_text: string
+  date_window_start: string | null
+  date_window_end: string | null
+  thread_scanned_count: number
+  thread_change_detected_count: number
+  thread_updated_count: number
+  http_request_count: number
+}
+
+export type CrawlRunDetail = CrawlRunSummary & {
+  new_post_count_total: number
+  updated_post_count_total: number
+  failed_thread_count: number
+  duration_ms: number | null
+}
+
+export type CrawlRunThread = {
+  id: number
+  thread_id: number
+  source_thread_id: number | null
+  change_detected_by_last_reply_at: boolean
+  detected_last_reply_at: string | null
+  fetched_page_count: number
+  page_limit_applied: boolean
+  new_post_count: number
+  updated_post_count: number
+  http_error_code: number | null
+  error_summary: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
 type QueryValue = string | number | boolean | null | undefined
 
 const buildQuery = (params?: Record<string, QueryValue>): string => {
@@ -109,3 +146,26 @@ export const fetchPostRevisions = (
   postId: number,
   params?: { page?: number; per_page?: number }
 ): Promise<ApiListResponse<PostRevision>> => requestJson(`/api/posts/${postId}/revisions`, params)
+
+/**
+ * 获取抓取运行列表（分页）。
+ */
+export const fetchCrawlRuns = (
+  params?: { page?: number; per_page?: number }
+): Promise<ApiListResponse<CrawlRunSummary>> => requestJson('/api/crawl-runs', params)
+
+/**
+ * 获取抓取运行详情。
+ */
+export const fetchCrawlRun = (
+  runId: number
+): Promise<ApiItemResponse<CrawlRunDetail>> => requestJson(`/api/crawl-runs/${runId}`)
+
+/**
+ * 获取抓取运行的主题明细（分页）。
+ */
+export const fetchCrawlRunThreads = (
+  runId: number,
+  params?: { page?: number; per_page?: number; only_failed?: boolean }
+): Promise<ApiListResponse<CrawlRunThread>> =>
+  requestJson(`/api/crawl-runs/${runId}/threads`, params)

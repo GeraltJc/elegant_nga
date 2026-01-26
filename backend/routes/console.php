@@ -65,8 +65,21 @@ Artisan::command('nga:crawl-lite {--source=http} {--fid=7} {--list-page=1} {--ma
     $crawler = new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
     $result = $crawler->crawlForum($fid, $maxPostPages, $recentDays, $listPage, $windowStart, $windowEnd);
 
+    $runId = $result['run_id'] ?? 'n/a';
+    $runWindowStart = $result['date_window_start'] ?? 'n/a';
+    $runWindowEnd = $result['date_window_end'] ?? 'n/a';
+    $runStartedAt = $result['run_started_at'] ?? 'n/a';
+    $runFinishedAt = $result['run_finished_at'] ?? 'n/a';
+    $durationMs = $result['duration_ms'] ?? 'n/a';
+
+    $this->info("Run ID: {$runId}");
+    $this->info("Run window: {$runWindowStart} ~ {$runWindowEnd}");
+    $this->info("Run time: {$runStartedAt} ~ {$runFinishedAt}");
+    $this->info("Duration ms: {$durationMs}");
     $this->info("Threads upserted: {$result['threads']}");
+    $this->info("Threads scanned/changed/updated/failed: {$result['thread_scanned_count']} / {$result['thread_change_detected_count']} / {$result['thread_updated_count']} / {$result['failed_thread_count']}");
     $this->info("Posts upserted: {$result['posts']}");
+    $this->info("Posts new/updated & HTTP requests: {$result['new_post_count']} / {$result['updated_post_count']} / {$result['http_request_count']}");
 })->purpose('Crawl NGA HTML list/detail as guest and persist threads/posts');
 
 Artisan::command('nga:crawl-thread {tid} {--source=http} {--max-post-pages=5} {--force} {--fixtures=}', function () {
@@ -96,6 +109,19 @@ Artisan::command('nga:crawl-thread {tid} {--source=http} {--max-post-pages=5} {-
     $crawler = new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
     $result = $crawler->crawlSingleThread($tid, $maxPostPages, $force);
 
+    $runId = $result['run_id'] ?? 'n/a';
+    $runWindowStart = $result['date_window_start'] ?? 'n/a';
+    $runWindowEnd = $result['date_window_end'] ?? 'n/a';
+    $runStartedAt = $result['run_started_at'] ?? 'n/a';
+    $runFinishedAt = $result['run_finished_at'] ?? 'n/a';
+    $durationMs = $result['duration_ms'] ?? 'n/a';
+
+    $this->info("Run ID: {$runId}");
+    $this->info("Run window: {$runWindowStart} ~ {$runWindowEnd}");
+    $this->info("Run time: {$runStartedAt} ~ {$runFinishedAt}");
+    $this->info("Duration ms: {$durationMs}");
     $this->info("Thread upserted: {$result['thread']}");
+    $this->info("Threads scanned/changed/updated/failed: {$result['thread_scanned_count']} / {$result['thread_change_detected_count']} / {$result['thread_updated_count']} / {$result['failed_thread_count']}");
     $this->info("Posts upserted: {$result['posts']}");
+    $this->info("Posts new/updated & HTTP requests: {$result['new_post_count']} / {$result['updated_post_count']} / {$result['http_request_count']}");
 })->purpose('Crawl single NGA thread by tid and persist');

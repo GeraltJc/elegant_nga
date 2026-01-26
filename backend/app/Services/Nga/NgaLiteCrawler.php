@@ -6,17 +6,38 @@ use App\Models\Forum;
 use App\Models\Post;
 use App\Models\PostRevision;
 use App\Models\Thread;
+use App\Services\Nga\CrawlErrorSummary;
+use App\Services\Nga\CrawlRunRecorder;
+use App\Services\Nga\Exceptions\NgaParseException;
+use App\Services\Nga\Exceptions\NgaRequestException;
+use Illuminate\Database\QueryException;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
+use Throwable;
 
 /**
  * 轻量抓取器：负责列表扫描与主题详情抓取的入库流程。
  */
 class NgaLiteCrawler
 {
+    /**
+     * 规则：主题总页数超过该阈值时直接跳过详情抓取。
+     */
     private const PAGE_TOTAL_SKIP_LIMIT = 1000;
+
+    /**
+     * 规则：内容指纹变化。
+     */
     private const CHANGE_REASON_CONTENT = 'content_fingerprint_changed';
+
+    /**
+     * 规则：来源标记为删除。
+     */
     private const CHANGE_REASON_DELETED = 'marked_deleted_by_source';
+
+    /**
+     * 规则：来源标记为折叠。
+     */
     private const CHANGE_REASON_FOLDED = 'marked_folded_by_source';
 
     /**
@@ -44,7 +65,24 @@ class NgaLiteCrawler
      * @param int $listPage 列表页码
      * @param CarbonImmutable|null $windowStart 窗口起（可选，默认 recentDays 计算）
      * @param CarbonImmutable|null $windowEnd 窗口止（可选，默认 recentDays 计算）
-     * @return array{threads:int, posts:int} 写入数量统计
+     * @param string $runTriggerText 运行触发来源
+     * @return array{
+     *     threads:int,
+     *     posts:int,
+     *     run_id:int|null,
+     *     run_started_at:string|null,
+     *     run_finished_at:string|null,
+     *     date_window_start:string|null,
+     *     date_window_end:string|null,
+     *     thread_scanned_count:int,
+     *     thread_change_detected_count:int,
+     *     thread_updated_count:int,
+     *     http_request_count:int,
+     *     new_post_count:int,
+     *     updated_post_count:int,
+     *     failed_thread_count:int,
+     *     duration_ms:int|null
+     * } 写入数量统计与运行汇总
      * 副作用：写入 forums/threads/posts 等数据。
      */
     public function crawlForum(
@@ -53,7 +91,8 @@ class NgaLiteCrawler
         ?int $recentDays = 3,
         int $listPage = 1,
         ?CarbonImmutable $windowStart = null,
-        ?CarbonImmutable $windowEnd = null
+        ?CarbonImmutable $windowEnd = null,
+        string $runTriggerText = 'manual'
     ): array
     {
         $now = CarbonImmutable::now('Asia/Shanghai');
@@ -72,79 +111,189 @@ class NgaLiteCrawler
             ]
         );
 
-        $threadsData = $this->listParser->parse($this->client->fetchList($fid, $listPage));
+        $runRecorder = new CrawlRunRecorder();
+        $run = $runRecorder->startRun($forum->id, $runTriggerText, $windowStart, $windowEnd, $now);
+        $this->configureHttpClientIfSupported($forum, $runRecorder);
 
         $threadsUpserted = 0;
         $postsUpserted = 0;
 
-        foreach ($threadsData as $threadData) {
-            $sourceThreadId = (int) ($threadData['source_thread_id'] ?? 0);
-            if ($sourceThreadId <= 0) {
-                continue;
+        try {
+            try {
+                $threadsData = $this->listParser->parse($this->client->fetchList($fid, $listPage));
+            } catch (Throwable $exception) {
+                throw new NgaParseException(
+                    CrawlErrorSummary::PARSE_LIST_FAILED,
+                    $exception->getMessage(),
+                    $exception
+                );
             }
 
-            $createdAt = $threadData['thread_created_at'];
-            if ($createdAt instanceof CarbonImmutable) {
-                // 业务规则：仅抓取自然日窗口内的主题
-                if ($windowStart && $createdAt->lt($windowStart)) {
+            foreach ($threadsData as $threadData) {
+                $sourceThreadId = (int) ($threadData['source_thread_id'] ?? 0);
+                if ($sourceThreadId <= 0) {
                     continue;
                 }
-                if ($windowEnd && $createdAt->gt($windowEnd)) {
+
+                $createdAt = $threadData['thread_created_at'];
+                if ($createdAt instanceof CarbonImmutable) {
+                    // 业务规则：仅抓取自然日窗口内的主题
+                    if ($windowStart && $createdAt->lt($windowStart)) {
+                        continue;
+                    }
+                    if ($windowEnd && $createdAt->gt($windowEnd)) {
+                        continue;
+                    }
+                }
+
+                $runRecorder->increaseThreadScannedCount();
+
+                $runThread = null;
+
+                try {
+                    $thread = Thread::firstOrNew([
+                        'forum_id' => $forum->id,
+                        'source_thread_id' => $sourceThreadId,
+                    ]);
+
+                    if (!$thread->exists) {
+                        $thread->first_seen_on_list_page_number = $listPage;
+                    }
+
+                    $lastReplyAt = $threadData['last_reply_at'];
+                    // 以 last_reply_at 变化作为增量抓取开关
+                    $lastReplyChanged = !$thread->exists || $this->hasLastReplyChanged($thread->last_reply_at, $lastReplyAt);
+                    if ($lastReplyChanged) {
+                        $thread->last_detected_change_at = $now;
+                        $runRecorder->increaseThreadChangeDetectedCount();
+                    }
+
+                    $thread->fill([
+                        'title' => $threadData['title'],
+                        'title_prefix_text' => $threadData['title_prefix_text'],
+                        'author_name' => $threadData['author_name'],
+                        'author_source_user_id' => $threadData['author_source_user_id'],
+                        'thread_created_at' => $createdAt,
+                        'last_reply_at' => $lastReplyAt,
+                        'reply_count_display' => $threadData['reply_count_display'],
+                        'view_count_display' => $threadData['view_count_display'],
+                        'is_pinned' => $threadData['is_pinned'],
+                        'is_digest' => $threadData['is_digest'],
+                        'last_seen_on_list_page_number' => $listPage,
+                    ]);
+
+                    $thread->save();
+                    $threadsUpserted++;
+
+                    // 兼容旧数据：如果之前因页上限被截断但没有“分段补齐游标”，先补齐游标
+                    $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
+
+                    $runThread = $runRecorder->startThread(
+                        $run,
+                        $thread,
+                        $lastReplyChanged,
+                        $lastReplyChanged ? $lastReplyAt : null,
+                        CarbonImmutable::now('Asia/Shanghai')
+                    );
+
+                    $threadStartPage = $this->determineThreadStartPage($thread, $lastReplyChanged);
+                    $shouldSkipByTotalLimit = (bool) $thread->is_skipped_by_page_total_limit;
+
+                    if ($shouldSkipByTotalLimit) {
+                        $runRecorder->markThreadSuccess(
+                            $runThread,
+                            CarbonImmutable::now('Asia/Shanghai'),
+                            0,
+                            false,
+                            0,
+                            0
+                        );
+                        continue;
+                    }
+
+                    if ($threadStartPage === null) {
+                        $runRecorder->markThreadSuccess(
+                            $runThread,
+                            CarbonImmutable::now('Asia/Shanghai'),
+                            0,
+                            false,
+                            0,
+                            0
+                        );
+                        continue;
+                    }
+
+                    $threadAttemptResult = $this->crawlThreadWithRetry(
+                        $thread,
+                        $threadStartPage,
+                        $maxPostPages,
+                        $now,
+                        $lastReplyChanged,
+                        2,
+                        $runThread->id
+                    );
+
+                    if ($threadAttemptResult['success']) {
+                        $threadResult = $threadAttemptResult['result'];
+                        $postsUpserted += $threadResult['posts'];
+                        $runRecorder->increaseThreadUpdatedCount();
+                        $runRecorder->increaseNewPostCount($threadResult['new_posts']);
+                        $runRecorder->increaseUpdatedPostCount($threadResult['updated_posts']);
+                        $runRecorder->markThreadSuccess(
+                            $runThread,
+                            CarbonImmutable::now('Asia/Shanghai'),
+                            $threadResult['fetched_pages'],
+                            $threadResult['page_limit_applied'],
+                            $threadResult['new_posts'],
+                            $threadResult['updated_posts']
+                        );
+                    } else {
+                        $runRecorder->increaseFailedThreadCount();
+                        $runRecorder->markThreadFailure(
+                            $runThread,
+                            CarbonImmutable::now('Asia/Shanghai'),
+                            $threadAttemptResult['http_error_code'],
+                            $threadAttemptResult['error_summary']
+                        );
+                    }
+                } catch (Throwable $exception) {
+                    $runRecorder->increaseFailedThreadCount();
+
+                    if ($runThread !== null) {
+                        $failure = $this->resolveThreadFailure($exception);
+                        $runRecorder->markThreadFailure(
+                            $runThread,
+                            CarbonImmutable::now('Asia/Shanghai'),
+                            $failure['http_error_code'],
+                            $failure['summary']
+                        );
+                    }
+
                     continue;
                 }
             }
-
-            $thread = Thread::firstOrNew([
-                'forum_id' => $forum->id,
-                'source_thread_id' => $sourceThreadId,
-            ]);
-
-            if (!$thread->exists) {
-                $thread->first_seen_on_list_page_number = $listPage;
-            }
-
-            $lastReplyAt = $threadData['last_reply_at'];
-            // 以 last_reply_at 变化作为增量抓取开关
-            $lastReplyChanged = !$thread->exists || $this->hasLastReplyChanged($thread->last_reply_at, $lastReplyAt);
-            if ($lastReplyChanged) {
-                $thread->last_detected_change_at = $now;
-            }
-
-            $thread->fill([
-                'title' => $threadData['title'],
-                'title_prefix_text' => $threadData['title_prefix_text'],
-                'author_name' => $threadData['author_name'],
-                'author_source_user_id' => $threadData['author_source_user_id'],
-                'thread_created_at' => $createdAt,
-                'last_reply_at' => $lastReplyAt,
-                'reply_count_display' => $threadData['reply_count_display'],
-                'view_count_display' => $threadData['view_count_display'],
-                'is_pinned' => $threadData['is_pinned'],
-                'is_digest' => $threadData['is_digest'],
-                'last_seen_on_list_page_number' => $listPage,
-            ]);
-
-            $thread->save();
-            $threadsUpserted++;
-
-            // 兼容旧数据：如果之前因页上限被截断但没有“分段补齐游标”，先补齐游标
-            $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
-
-            if ($thread->is_skipped_by_page_total_limit) {
-                // 业务规则：超页数上限的主题不抓详情，只更新列表字段
-                continue;
-            }
-
-            $startPage = $this->determineThreadStartPage($thread, $lastReplyChanged);
-            if ($startPage !== null) {
-                $threadResult = $this->crawlThreadSegment($thread, $startPage, $maxPostPages, $now, $lastReplyChanged);
-                $postsUpserted += $threadResult['posts'];
-            }
+        } finally {
+            $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
         }
+
+        $runSummary = $runRecorder->getSummary();
 
         return [
             'threads' => $threadsUpserted,
             'posts' => $postsUpserted,
+            'run_id' => $runSummary['run_id'],
+            'run_started_at' => $runSummary['run_started_at'],
+            'run_finished_at' => $runSummary['run_finished_at'],
+            'date_window_start' => $runSummary['date_window_start'],
+            'date_window_end' => $runSummary['date_window_end'],
+            'thread_scanned_count' => $runSummary['thread_scanned_count'],
+            'thread_change_detected_count' => $runSummary['thread_change_detected_count'],
+            'thread_updated_count' => $runSummary['thread_updated_count'],
+            'http_request_count' => $runSummary['http_request_count'],
+            'new_post_count' => $runSummary['new_post_count'],
+            'updated_post_count' => $runSummary['updated_post_count'],
+            'failed_thread_count' => $runSummary['failed_thread_count'],
+            'duration_ms' => $runSummary['duration_ms'],
         ];
     }
 
@@ -154,11 +303,33 @@ class NgaLiteCrawler
      * @param int $tid 主题 tid
      * @param int $maxPostPages 单次抓取最大页数
      * @param bool $force 是否清空游标后从第一页重抓
-     * @return array{thread:int, posts:int} 写入数量统计
+     * @param string $runTriggerText 运行触发来源
+     * @return array{
+     *     thread:int,
+     *     posts:int,
+     *     run_id:int|null,
+     *     run_started_at:string|null,
+     *     run_finished_at:string|null,
+     *     date_window_start:string|null,
+     *     date_window_end:string|null,
+     *     thread_scanned_count:int,
+     *     thread_change_detected_count:int,
+     *     thread_updated_count:int,
+     *     http_request_count:int,
+     *     new_post_count:int,
+     *     updated_post_count:int,
+     *     failed_thread_count:int,
+     *     duration_ms:int|null
+     * } 写入数量统计与运行汇总
      * 副作用：写入 threads/posts 并更新抓取游标。
+     * 说明：当主题被标记为超页数跳过且未强制时，仅记录审计结果。
      */
-    public function crawlSingleThread(int $tid, int $maxPostPages = 5, bool $force = false): array
-    {
+    public function crawlSingleThread(
+        int $tid,
+        int $maxPostPages = 5,
+        bool $force = false,
+        string $runTriggerText = 'manual'
+    ): array {
         $now = CarbonImmutable::now('Asia/Shanghai');
         $thread = Thread::firstOrNew([
             'source_thread_id' => $tid,
@@ -188,15 +359,91 @@ class NgaLiteCrawler
             $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
         }
 
-        if (!$force && $thread->is_skipped_by_page_total_limit) {
-            return ['thread' => 0, 'posts' => 0];
+        $forum = Forum::query()->find($thread->forum_id);
+        if (!$forum instanceof Forum) {
+            $forumId = $this->getOrCreateForumId();
+            $forum = Forum::query()->find($forumId);
         }
 
-        $result = $this->crawlThreadSegment($thread, 1, $maxPostPages, $now, true);
+        $runRecorder = new CrawlRunRecorder();
+        $run = $runRecorder->startRun(
+            $forum?->id ?? $this->getOrCreateForumId(),
+            $runTriggerText,
+            null,
+            null,
+            $now
+        );
+        if ($forum instanceof Forum) {
+            $this->configureHttpClientIfSupported($forum, $runRecorder);
+        }
+
+        $runRecorder->increaseThreadScannedCount();
+
+        $runThread = $runRecorder->startThread(
+            $run,
+            $thread,
+            false,
+            null,
+            CarbonImmutable::now('Asia/Shanghai')
+        );
+
+        $threadCount = 0;
+        $postCount = 0;
+
+        try {
+            if (!$force && $thread->is_skipped_by_page_total_limit) {
+                $runRecorder->markThreadSuccess(
+                    $runThread,
+                    CarbonImmutable::now('Asia/Shanghai'),
+                    0,
+                    false,
+                    0,
+                    0
+                );
+            } else {
+                $threadAttemptResult = $this->crawlThreadWithRetry(
+                    $thread,
+                    1,
+                    $maxPostPages,
+                    $now,
+                    true,
+                    2,
+                    $runThread->id
+                );
+
+                if ($threadAttemptResult['success']) {
+                    $threadResult = $threadAttemptResult['result'];
+                    $threadCount = 1;
+                    $postCount = $threadResult['posts'];
+                    $runRecorder->increaseThreadUpdatedCount();
+                    $runRecorder->increaseNewPostCount($threadResult['new_posts']);
+                    $runRecorder->increaseUpdatedPostCount($threadResult['updated_posts']);
+                    $runRecorder->markThreadSuccess(
+                        $runThread,
+                        CarbonImmutable::now('Asia/Shanghai'),
+                        $threadResult['fetched_pages'],
+                        $threadResult['page_limit_applied'],
+                        $threadResult['new_posts'],
+                        $threadResult['updated_posts']
+                    );
+                } else {
+                    $runRecorder->increaseFailedThreadCount();
+                    $runRecorder->markThreadFailure(
+                        $runThread,
+                        CarbonImmutable::now('Asia/Shanghai'),
+                        $threadAttemptResult['http_error_code'],
+                        $threadAttemptResult['error_summary']
+                    );
+                }
+            }
+        } finally {
+            $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
+        }
 
         return [
-            'thread' => 1,
-            'posts' => $result['posts'],
+            'thread' => $threadCount,
+            'posts' => $postCount,
+            ...$runRecorder->getSummary(),
         ];
     }
 
@@ -208,7 +455,8 @@ class NgaLiteCrawler
      * @param int $maxPostPages 单次抓取最大页数
      * @param CarbonImmutable $now 抓取时刻（上海时区）
      * @param bool $shouldCheckExistingPosts 是否复查已抓楼层（用于编辑/删除/折叠检测）
-     * @return array{posts:int} 写入楼层数
+     * @param int|null $crawlRunThreadId 抓取明细 ID（用于关联版本记录）
+     * @return array{posts:int, new_posts:int, updated_posts:int, fetched_pages:int, page_limit_applied:bool} 写入楼层数
      * 副作用：写入 posts 并更新 threads 的抓取游标。
      */
     private function crawlThreadSegment(
@@ -216,12 +464,16 @@ class NgaLiteCrawler
         int $startPage,
         int $maxPostPages,
         CarbonImmutable $now,
-        bool $shouldCheckExistingPosts
+        bool $shouldCheckExistingPosts,
+        ?int $crawlRunThreadId = null
     ): array
     {
         $page = max(1, $startPage);
         $pageTotal = 1;
         $postsUpserted = 0;
+        $newPostCount = 0;
+        $updatedPostCount = 0;
+        $fetchedPageCount = 0;
         $maxFloor = $thread->crawl_cursor_max_floor_number;
         $maxPid = $thread->crawl_cursor_max_source_post_id;
         $endPageFetched = null;
@@ -229,7 +481,17 @@ class NgaLiteCrawler
         $pageLimitEnd = $page + max(1, $maxPostPages) - 1;
 
         while ($page <= $pageLimitEnd) {
-            $pageData = $this->threadParser->parse($this->client->fetchThread($thread->source_thread_id, $page));
+            try {
+                $pageData = $this->threadParser->parse($this->client->fetchThread($thread->source_thread_id, $page));
+            } catch (Throwable $exception) {
+                throw new NgaParseException(
+                    CrawlErrorSummary::PARSE_THREAD_FAILED,
+                    $exception->getMessage(),
+                    $exception
+                );
+            }
+
+            $fetchedPageCount++;
             $pageTotal = max($pageTotal, (int) $pageData['page_total']);
 
             $thread->crawl_page_total_last_seen = $pageTotal;
@@ -252,7 +514,13 @@ class NgaLiteCrawler
                 $thread->truncated_at_page_number = null;
                 $thread->save();
 
-                return ['posts' => 0];
+                return [
+                    'posts' => 0,
+                    'new_posts' => 0,
+                    'updated_posts' => 0,
+                    'fetched_pages' => $fetchedPageCount,
+                    'page_limit_applied' => false,
+                ];
             }
 
             foreach ($pageData['posts'] as $postData) {
@@ -316,7 +584,8 @@ class NgaLiteCrawler
                         $previousSnapshot,
                         $now,
                         $sourceEditedAt,
-                        $changeEvaluation['reasons']
+                        $changeEvaluation['reasons'],
+                        $crawlRunThreadId
                     );
                 }
 
@@ -328,6 +597,11 @@ class NgaLiteCrawler
                 $post->save();
                 if ($changeEvaluation['has_any_change']) {
                     $postsUpserted++;
+                    if (!$wasExisting) {
+                        $newPostCount++;
+                    } else {
+                        $updatedPostCount++;
+                    }
                 }
 
                 $maxFloor = $maxFloor === null ? $floorNumber : max($maxFloor, $floorNumber);
@@ -358,7 +632,154 @@ class NgaLiteCrawler
         ]);
         $thread->save();
 
-        return ['posts' => $postsUpserted];
+        return [
+            'posts' => $postsUpserted,
+            'new_posts' => $newPostCount,
+            'updated_posts' => $updatedPostCount,
+            'fetched_pages' => $fetchedPageCount,
+            'page_limit_applied' => $hasMorePages,
+        ];
+    }
+
+    /**
+     * 带主题级重试的抓取执行器（兜底一次）。
+     *
+     * @param Thread $thread 主题模型
+     * @param int $startPage 起始页码
+     * @param int $maxPostPages 单次抓取最大页数
+     * @param CarbonImmutable $now 抓取时刻
+     * @param bool $shouldCheckExistingPosts 是否复查已抓楼层
+     * @param int $maxAttempts 最大尝试次数
+     * @param int|null $crawlRunThreadId 抓取明细 ID
+     * @return array{
+     *     success:bool,
+     *     result:array{posts:int, new_posts:int, updated_posts:int, fetched_pages:int, page_limit_applied:bool}|null,
+     *     error_summary:string|null,
+     *     http_error_code:int|null
+     * } 执行结果
+     * 副作用：可能写入 posts 与 threads 游标。
+     */
+    private function crawlThreadWithRetry(
+        Thread $thread,
+        int $startPage,
+        int $maxPostPages,
+        CarbonImmutable $now,
+        bool $shouldCheckExistingPosts,
+        int $maxAttempts,
+        ?int $crawlRunThreadId
+    ): array {
+        $attempt = 1;
+        $normalizedMaxAttempts = max(1, $maxAttempts);
+
+        while ($attempt <= $normalizedMaxAttempts) {
+            try {
+                $result = $this->crawlThreadSegment(
+                    $thread,
+                    $startPage,
+                    $maxPostPages,
+                    $now,
+                    $shouldCheckExistingPosts,
+                    $crawlRunThreadId
+                );
+
+                return [
+                    'success' => true,
+                    'result' => $result,
+                    'error_summary' => null,
+                    'http_error_code' => null,
+                ];
+            } catch (Throwable $exception) {
+                $shouldRetry = $attempt < $normalizedMaxAttempts;
+                if (!$shouldRetry) {
+                    $failure = $this->resolveThreadFailure($exception);
+
+                    return [
+                        'success' => false,
+                        'result' => null,
+                        'error_summary' => $failure['summary'],
+                        'http_error_code' => $failure['http_error_code'],
+                    ];
+                }
+            }
+
+            $attempt++;
+        }
+
+        return [
+            'success' => false,
+            'result' => null,
+            'error_summary' => CrawlErrorSummary::UNKNOWN_ERROR,
+            'http_error_code' => null,
+        ];
+    }
+
+    /**
+     * 将异常映射为可审计的错误摘要与 HTTP 状态码。
+     *
+     * @param Throwable $exception 异常对象
+     * @return array{summary:string, http_error_code:int|null} 错误摘要与状态码
+     * 无副作用。
+     */
+    private function resolveThreadFailure(Throwable $exception): array
+    {
+        if ($exception instanceof NgaRequestException) {
+            return [
+                'summary' => $exception->getSummaryToken(),
+                'http_error_code' => $exception->getStatusCode(),
+            ];
+        }
+
+        if ($exception instanceof NgaParseException) {
+            return [
+                'summary' => $exception->getSummaryToken(),
+                'http_error_code' => null,
+            ];
+        }
+
+        if ($exception instanceof QueryException) {
+            return [
+                'summary' => CrawlErrorSummary::DB_WRITE_FAILED,
+                'http_error_code' => null,
+            ];
+        }
+
+        return [
+            'summary' => CrawlErrorSummary::formatWithMessage(
+                CrawlErrorSummary::UNKNOWN_ERROR,
+                $exception->getMessage()
+            ),
+            'http_error_code' => null,
+        ];
+    }
+
+    /**
+     * 若当前客户端支持 HTTP 统计与限速，则注入相关配置。
+     *
+     * 说明：仅当 request_rate_limit_per_sec 为正数时启用限速。
+     *
+     * @param Forum $forum 论坛配置
+     * @param CrawlRunRecorder $runRecorder 运行记录器
+     * @return void
+     * 无副作用。
+     */
+    private function configureHttpClientIfSupported(Forum $forum, CrawlRunRecorder $runRecorder): void
+    {
+        if (!$this->client instanceof HttpNgaLiteClient) {
+            return;
+        }
+
+        $rateLimitPerSec = is_numeric($forum->request_rate_limit_per_sec)
+            ? (float) $forum->request_rate_limit_per_sec
+            : null;
+
+        $shouldEnableRateLimit = $rateLimitPerSec !== null && $rateLimitPerSec > 0;
+        if ($shouldEnableRateLimit) {
+            $this->client->setRequestRateLimitPerSec($rateLimitPerSec);
+        }
+
+        $this->client->setRequestAttemptObserver(function () use ($runRecorder): void {
+            $runRecorder->increaseHttpRequestCount();
+        });
     }
 
     /**
@@ -463,6 +884,7 @@ class NgaLiteCrawler
      * @param CarbonImmutable $now 抓取时刻（上海时区）
      * @param CarbonInterface|null $sourceEditedAt 来源编辑时间（若可得）
      * @param array<int, string> $reasons 变更原因 token 列表
+     * @param int|null $crawlRunThreadId 抓取明细 ID
      * 副作用：写入 post_revisions。
      */
     private function recordPostRevision(
@@ -470,7 +892,8 @@ class NgaLiteCrawler
         array $previousSnapshot,
         CarbonImmutable $now,
         ?CarbonInterface $sourceEditedAt,
-        array $reasons
+        array $reasons,
+        ?int $crawlRunThreadId
     ): void {
         if (!$post->exists || $post->id === null) {
             // 防御性检查：仅对已存在楼层写入历史记录
@@ -488,8 +911,7 @@ class NgaLiteCrawler
             'content_html' => $previousSnapshot['content_html'],
             'content_fingerprint_sha256' => $previousSnapshot['content_fingerprint_sha256'],
             'change_detected_reason' => implode(';', $reasons),
-            // 业务规则：抓取审计明细尚未接入，先留空
-            'crawl_run_thread_id' => null,
+            'crawl_run_thread_id' => $crawlRunThreadId,
         ]);
     }
 

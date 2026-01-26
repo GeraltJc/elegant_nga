@@ -40,3 +40,37 @@
 ### 8) Sanitizer 实现方式
 - 问题：引入第三方库还是自研？
 - 方案：使用 `ezyang/htmlpurifier`，并叠加自定义策略做二次校验。
+
+## T-0008 - 运行报表与稳定性优化
+
+### 1) 是否新增运行审计表
+- 问题：运行报表是仅靠日志，还是必须落库追溯？
+- 方案：新增 `crawl_runs` + `crawl_run_threads` 两张表，保证 run 与 thread 级可追溯。
+
+### 2) 运行级统计口径与关键字段
+- 问题：run 层需要记录哪些统计，是否保存时间窗？
+- 方案：记录 `run_started_at/run_finished_at`、`run_trigger_text`、`date_window_start/date_window_end`、`thread_scanned_count/thread_change_detected_count/thread_updated_count/http_request_count`；耗时由开始/结束时间计算。
+
+### 3) 主题级明细需要记录什么
+- 问题：thread 层明细要覆盖哪些排查字段？
+- 方案：记录变更检测、抓取页数、页上限、楼层新增/更新、错误摘要与 HTTP code、开始/结束时间等关键信息。
+
+### 4) 错误摘要归类口径
+- 问题：错误类型如何统一，便于统计与排查？
+- 方案：固定枚举口径：`http_429/http_5xx/http_4xx/http_timeout/http_connect_error/guest_blocked/parse_list_failed/parse_thread_failed/db_write_failed/unknown_error`，同时保留 `http_error_code`。
+
+### 5) 失败是否中断与重试策略
+- 问题：单主题失败是否中断整次抓取，是否重试？
+- 方案：失败记录后继续其他主题；单主题抓取兜底重试 1 次（最多 2 次尝试）。
+
+### 6) 限速与退避策略
+- 问题：是否要加限速与指数退避？
+- 方案：启用按版块配置的请求限速，并结合指数退避 + jitter，避免集中重试造成雪崩。
+
+### 7) 报表 API 形态
+- 问题：报表查询需要哪些接口形态？
+- 方案：提供 `GET /api/crawl-runs`、`GET /api/crawl-runs/{id}`、`GET /api/crawl-runs/{id}/threads`，详情接口返回汇总统计与耗时。
+
+### 8) 分页与过滤策略
+- 问题：分页默认值与过滤能力如何定？
+- 方案：默认 `per_page=20`（允许 1~100）；线程明细支持 `only_failed` 可选过滤；运行列表暂不增加额外过滤条件。

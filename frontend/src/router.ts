@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import CrawlRunDetailPage from './pages/CrawlRunDetailPage.vue'
+import CrawlRunListPage from './pages/CrawlRunListPage.vue'
 import ThreadDetailPage from './pages/ThreadDetailPage.vue'
 import ThreadListPage from './pages/ThreadListPage.vue'
 import NotFoundPage from './pages/NotFoundPage.vue'
@@ -7,6 +9,12 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'threads', component: ThreadListPage },
+    { path: '/crawl-runs', name: 'crawl-runs', component: CrawlRunListPage },
+    {
+      path: '/crawl-runs/:runId(\\d+)',
+      name: 'crawl-run-detail',
+      component: CrawlRunDetailPage,
+    },
     {
       path: '/threads/:tid(\\d+)',
       name: 'thread-detail',

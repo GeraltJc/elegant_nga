@@ -48,6 +48,17 @@ docker compose up -d frontend
 
 默认访问：`http://localhost:5173`（可用 `FRONTEND_PORT` 调整）
 
+页面入口：
+- 运行报表列表：`http://localhost:5173/crawl-runs`
+- 运行报表详情：`http://localhost:5173/crawl-runs/{runId}`
+
+API 说明（运行报表）：
+- API 基址（后端）：`http://localhost:8080/api`
+- 前端开发代理：`http://localhost:5173/api`（Vite 代理到 nginx）
+- 运行列表：`GET /api/crawl-runs?page=1&per_page=20`
+- 运行详情：`GET /api/crawl-runs/{runId}`
+- 主题明细：`GET /api/crawl-runs/{runId}/threads?only_failed=1`
+
 本地方式：
 
 ```bash

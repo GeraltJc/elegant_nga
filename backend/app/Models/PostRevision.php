@@ -43,4 +43,14 @@ class PostRevision extends Model
     {
         return $this->belongsTo(Post::class);
     }
+
+    /**
+     * 关联产生该版本的抓取明细（crawl_run_threads）。
+     *
+     * @return BelongsTo
+     */
+    public function crawlRunThread(): BelongsTo
+    {
+        return $this->belongsTo(CrawlRunThread::class);
+    }
 }
