@@ -15,7 +15,14 @@ class NgaLiteThreadParser
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
+     * @return array{
+     *     source_thread_id:int,
+     *     page:int,
+     *     page_total:int,
+     *     reply_count_total:int|null,
+     *     posts:array<int, array<string, mixed>>,
+     *     thread_title?:string
+     * }
      */
     public function parse(string $raw): array
     {
@@ -27,7 +34,14 @@ class NgaLiteThreadParser
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
+     * @return array{
+     *     source_thread_id:int,
+     *     page:int,
+     *     page_total:int,
+     *     reply_count_total:int|null,
+     *     posts:array<int, array<string, mixed>>,
+     *     thread_title?:string
+     * }
      */
     private function parseJson(string $raw): array
     {
@@ -65,6 +79,18 @@ class NgaLiteThreadParser
         }
         if ($threadTitle === '') {
             $threadTitle = $this->stringValue($payload['data'] ?? $payload, ['subject', 'title'], '');
+        }
+
+        $replyCountTotal = null;
+        // 业务语义：详情页“总行数/总楼层”包含 1 楼（楼主），所以需要 -1 才是列表口径的“回复数”
+        if ($rowCount !== null && $rowCount >= 1) {
+            $replyCountTotal = max(0, $rowCount - 1);
+        }
+        if ($replyCountTotal === null && is_array($threadMeta)) {
+            $replyCountTotal = $this->intValue($threadMeta, ['replies', 'reply_count', 'replyCount', 'reply_total'], null);
+        }
+        if ($replyCountTotal === null) {
+            $replyCountTotal = $this->intValue($payload['data'] ?? $payload, ['replies', 'reply_count', 'replyCount', 'reply_total'], null);
         }
 
         $users = $payload['data']['__U'] ?? $payload['__U'] ?? [];
@@ -114,13 +140,21 @@ class NgaLiteThreadParser
             'source_thread_id' => $sourceThreadId,
             'page' => $page,
             'page_total' => $pageTotal,
+            'reply_count_total' => $replyCountTotal === null ? null : max(0, (int) $replyCountTotal),
             'posts' => $resultPosts,
             'thread_title' => $threadTitle,
         ];
     }
 
     /**
-     * @return array{source_thread_id:int, page:int, page_total:int, posts:array<int, array<string, mixed>>, thread_title?:string}
+     * @return array{
+     *     source_thread_id:int,
+     *     page:int,
+     *     page_total:int,
+     *     reply_count_total:int|null,
+     *     posts:array<int, array<string, mixed>>,
+     *     thread_title?:string
+     * }
      */
     private function parseHtml(string $raw): array
     {
@@ -134,6 +168,7 @@ class NgaLiteThreadParser
         $sourceThreadId = $this->extractThreadId($html);
         [$page, $pageTotal] = $this->extractPageMeta($html);
         $threadTitle = $this->extractThreadTitleFromHtml($xpath);
+        $replyCountTotal = $this->extractReplyCountFromHtml($html);
 
         $rows = $xpath->query("//tr[contains(@class,'postrow')]");
         if ($rows === false || $rows->length === 0) {
@@ -193,9 +228,27 @@ class NgaLiteThreadParser
             'source_thread_id' => $sourceThreadId,
             'page' => $page,
             'page_total' => $pageTotal,
+            'reply_count_total' => $replyCountTotal,
             'posts' => $resultPosts,
             'thread_title' => $threadTitle,
         ];
+    }
+
+    /**
+     * 从 HTML 文本中提取“回复数”口径（不含楼主）。
+     *
+     * @param string $html 原始 HTML
+     * @return int|null 回复数（无法解析时返回 null）
+     * 无副作用。
+     */
+    private function extractReplyCountFromHtml(string $html): ?int
+    {
+        // 风险点：NGA 页面结构可能变动；这里采用宽松正则，仅作为补充信息，不作为唯一来源
+        if (preg_match('/(?:回复|回帖)\\s*[:：]\\s*(\\d+)/u', $html, $matches) === 1) {
+            return max(0, (int) $matches[1]);
+        }
+
+        return null;
     }
 
     private function parseEditedAt(array $post): ?CarbonImmutable

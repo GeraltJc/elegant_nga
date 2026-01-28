@@ -117,160 +117,192 @@ class NgaLiteCrawler
 
         $threadsUpserted = 0;
         $postsUpserted = 0;
+        // 业务规则：仅在窗口抓取场景启用“自动翻页”，否则保持手动页码行为
+        $shouldAutoPage = $windowStart !== null || $windowEnd !== null;
+        $currentPage = max(1, $listPage);
 
         try {
-            try {
-                $threadsData = $this->listParser->parse($this->client->fetchList($fid, $listPage));
-            } catch (Throwable $exception) {
-                throw new NgaParseException(
-                    CrawlErrorSummary::PARSE_LIST_FAILED,
-                    $exception->getMessage(),
-                    $exception
-                );
-            }
-
-            foreach ($threadsData as $threadData) {
-                $sourceThreadId = (int) ($threadData['source_thread_id'] ?? 0);
-                if ($sourceThreadId <= 0) {
-                    continue;
-                }
-
-                $createdAt = $threadData['thread_created_at'];
-                if ($createdAt instanceof CarbonImmutable) {
-                    // 业务规则：仅抓取自然日窗口内的主题
-                    if ($windowStart && $createdAt->lt($windowStart)) {
-                        continue;
-                    }
-                    if ($windowEnd && $createdAt->gt($windowEnd)) {
-                        continue;
-                    }
-                }
-
-                $runRecorder->increaseThreadScannedCount();
-
-                $runThread = null;
-
+            while (true) {
                 try {
-                    $thread = Thread::firstOrNew([
-                        'forum_id' => $forum->id,
-                        'source_thread_id' => $sourceThreadId,
-                    ]);
-
-                    if (!$thread->exists) {
-                        $thread->first_seen_on_list_page_number = $listPage;
-                    }
-
-                    $lastReplyAt = $threadData['last_reply_at'];
-                    // 以 last_reply_at 变化作为增量抓取开关
-                    $lastReplyChanged = !$thread->exists || $this->hasLastReplyChanged($thread->last_reply_at, $lastReplyAt);
-                    if ($lastReplyChanged) {
-                        $thread->last_detected_change_at = $now;
-                        $runRecorder->increaseThreadChangeDetectedCount();
-                    }
-
-                    $thread->fill([
-                        'title' => $threadData['title'],
-                        'title_prefix_text' => $threadData['title_prefix_text'],
-                        'author_name' => $threadData['author_name'],
-                        'author_source_user_id' => $threadData['author_source_user_id'],
-                        'thread_created_at' => $createdAt,
-                        'last_reply_at' => $lastReplyAt,
-                        'reply_count_display' => $threadData['reply_count_display'],
-                        'view_count_display' => $threadData['view_count_display'],
-                        'is_pinned' => $threadData['is_pinned'],
-                        'is_digest' => $threadData['is_digest'],
-                        'last_seen_on_list_page_number' => $listPage,
-                    ]);
-
-                    $thread->save();
-                    $threadsUpserted++;
-
-                    // 兼容旧数据：如果之前因页上限被截断但没有“分段补齐游标”，先补齐游标
-                    $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
-
-                    $runThread = $runRecorder->startThread(
-                        $run,
-                        $thread,
-                        $lastReplyChanged,
-                        $lastReplyChanged ? $lastReplyAt : null,
-                        CarbonImmutable::now('Asia/Shanghai')
-                    );
-
-                    $threadStartPage = $this->determineThreadStartPage($thread, $lastReplyChanged);
-                    $shouldSkipByTotalLimit = (bool) $thread->is_skipped_by_page_total_limit;
-
-                    if ($shouldSkipByTotalLimit) {
-                        $runRecorder->markThreadSuccess(
-                            $runThread,
-                            CarbonImmutable::now('Asia/Shanghai'),
-                            0,
-                            false,
-                            0,
-                            0
-                        );
-                        continue;
-                    }
-
-                    if ($threadStartPage === null) {
-                        $runRecorder->markThreadSuccess(
-                            $runThread,
-                            CarbonImmutable::now('Asia/Shanghai'),
-                            0,
-                            false,
-                            0,
-                            0
-                        );
-                        continue;
-                    }
-
-                    $threadAttemptResult = $this->crawlThreadWithRetry(
-                        $thread,
-                        $threadStartPage,
-                        $maxPostPages,
-                        $now,
-                        $lastReplyChanged,
-                        2,
-                        $runThread->id
-                    );
-
-                    if ($threadAttemptResult['success']) {
-                        $threadResult = $threadAttemptResult['result'];
-                        $postsUpserted += $threadResult['posts'];
-                        $runRecorder->increaseThreadUpdatedCount();
-                        $runRecorder->increaseNewPostCount($threadResult['new_posts']);
-                        $runRecorder->increaseUpdatedPostCount($threadResult['updated_posts']);
-                        $runRecorder->markThreadSuccess(
-                            $runThread,
-                            CarbonImmutable::now('Asia/Shanghai'),
-                            $threadResult['fetched_pages'],
-                            $threadResult['page_limit_applied'],
-                            $threadResult['new_posts'],
-                            $threadResult['updated_posts']
-                        );
-                    } else {
-                        $runRecorder->increaseFailedThreadCount();
-                        $runRecorder->markThreadFailure(
-                            $runThread,
-                            CarbonImmutable::now('Asia/Shanghai'),
-                            $threadAttemptResult['http_error_code'],
-                            $threadAttemptResult['error_summary']
-                        );
-                    }
+                    $threadsData = $this->listParser->parse($this->client->fetchList($fid, $currentPage));
                 } catch (Throwable $exception) {
-                    $runRecorder->increaseFailedThreadCount();
+                    throw new NgaParseException(
+                        CrawlErrorSummary::PARSE_LIST_FAILED,
+                        $exception->getMessage(),
+                        $exception
+                    );
+                }
 
-                    if ($runThread !== null) {
-                        $failure = $this->resolveThreadFailure($exception);
-                        $runRecorder->markThreadFailure(
-                            $runThread,
-                            CarbonImmutable::now('Asia/Shanghai'),
-                            $failure['http_error_code'],
-                            $failure['summary']
-                        );
+                if ($threadsData === []) {
+                    break;
+                }
+
+                // 业务规则：按“创建时间窗口”判断是否可以停止翻页
+                $shouldStopPaging = $shouldAutoPage
+                    && $this->shouldStopListPagingByWindow($threadsData, $windowStart, $windowEnd);
+
+                foreach ($threadsData as $threadData) {
+                    $sourceThreadId = (int) ($threadData['source_thread_id'] ?? 0);
+                    if ($sourceThreadId <= 0) {
+                        continue;
                     }
 
-                    continue;
+                    $createdAt = $threadData['thread_created_at'] ?? null;
+                    $createdAt = $createdAt instanceof CarbonImmutable ? $createdAt : null;
+                    $shouldSkipThreadDetail = $this->shouldSkipThreadDetailByWindow($createdAt, $windowStart, $windowEnd);
+
+                    $runRecorder->increaseThreadScannedCount();
+
+                    $runThread = null;
+
+                    try {
+                        $thread = Thread::firstOrNew([
+                            'forum_id' => $forum->id,
+                            'source_thread_id' => $sourceThreadId,
+                        ]);
+
+                        if (!$thread->exists) {
+                            $thread->first_seen_on_list_page_number = $currentPage;
+                        }
+
+                        $lastReplyAt = $threadData['last_reply_at'];
+                        // 以 last_reply_at 变化作为增量抓取开关
+                        $lastReplyChanged = !$thread->exists || $this->hasLastReplyChanged($thread->last_reply_at, $lastReplyAt);
+                        if ($lastReplyChanged) {
+                            $thread->last_detected_change_at = $now;
+                            $runRecorder->increaseThreadChangeDetectedCount();
+                        }
+
+                        $thread->fill([
+                            'title' => $threadData['title'],
+                            'title_prefix_text' => $threadData['title_prefix_text'],
+                            'author_name' => $threadData['author_name'],
+                            'author_source_user_id' => $threadData['author_source_user_id'],
+                            'thread_created_at' => $createdAt,
+                            'last_reply_at' => $lastReplyAt,
+                            'reply_count_display' => $threadData['reply_count_display'],
+                            'view_count_display' => $threadData['view_count_display'],
+                            'is_pinned' => $threadData['is_pinned'],
+                            'is_digest' => $threadData['is_digest'],
+                            'last_seen_on_list_page_number' => $currentPage,
+                        ]);
+
+                        $thread->save();
+                        $threadsUpserted++;
+
+                        $runThread = $runRecorder->startThread(
+                            $run,
+                            $thread,
+                            $lastReplyChanged,
+                            $lastReplyChanged ? $lastReplyAt : null,
+                            CarbonImmutable::now('Asia/Shanghai')
+                        );
+
+                        if ($shouldSkipThreadDetail) {
+                            // 业务规则：创建时间超过窗口的主题不抓取回复详情
+                            $runRecorder->markThreadSuccess(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                0,
+                                false,
+                                0,
+                                0
+                            );
+                            continue;
+                        }
+
+                        // 兼容旧数据：如果之前因页上限被截断但没有“分段补齐游标”，先补齐游标
+                        $this->bootstrapBackfillCursorIfNeeded($thread, $maxPostPages);
+
+                        $threadStartPage = $this->determineThreadStartPage($thread, $lastReplyChanged);
+                        $shouldSkipByTotalLimit = (bool) $thread->is_skipped_by_page_total_limit;
+
+                        if ($shouldSkipByTotalLimit) {
+                            $runRecorder->markThreadSuccess(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                0,
+                                false,
+                                0,
+                                0
+                            );
+                            continue;
+                        }
+
+                        if ($threadStartPage === null) {
+                            $runRecorder->markThreadSuccess(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                0,
+                                false,
+                                0,
+                                0
+                            );
+                            continue;
+                        }
+
+                        $threadMaxPostPages = $this->resolveThreadMaxPostPages(
+                            $maxPostPages,
+                            $createdAt,
+                            $windowStart,
+                            $windowEnd
+                        );
+
+                        $threadAttemptResult = $this->crawlThreadWithRetry(
+                            $thread,
+                            $threadStartPage,
+                            $threadMaxPostPages,
+                            $now,
+                            $lastReplyChanged,
+                            2,
+                            $runThread->id
+                        );
+
+                        if ($threadAttemptResult['success']) {
+                            $threadResult = $threadAttemptResult['result'];
+                            $postsUpserted += $threadResult['posts'];
+                            $runRecorder->increaseThreadUpdatedCount();
+                            $runRecorder->increaseNewPostCount($threadResult['new_posts']);
+                            $runRecorder->increaseUpdatedPostCount($threadResult['updated_posts']);
+                            $runRecorder->markThreadSuccess(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                $threadResult['fetched_pages'],
+                                $threadResult['page_limit_applied'],
+                                $threadResult['new_posts'],
+                                $threadResult['updated_posts']
+                            );
+                        } else {
+                            $runRecorder->increaseFailedThreadCount();
+                            $runRecorder->markThreadFailure(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                $threadAttemptResult['http_error_code'],
+                                $threadAttemptResult['error_summary']
+                            );
+                        }
+                    } catch (Throwable $exception) {
+                        $runRecorder->increaseFailedThreadCount();
+
+                        if ($runThread !== null) {
+                            $failure = $this->resolveThreadFailure($exception);
+                            $runRecorder->markThreadFailure(
+                                $runThread,
+                                CarbonImmutable::now('Asia/Shanghai'),
+                                $failure['http_error_code'],
+                                $failure['summary']
+                            );
+                        }
+
+                        continue;
+                    }
                 }
+
+                if (!$shouldAutoPage || $shouldStopPaging) {
+                    break;
+                }
+
+                $currentPage++;
             }
         } finally {
             $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
@@ -477,6 +509,7 @@ class NgaLiteCrawler
         $maxFloor = $thread->crawl_cursor_max_floor_number;
         $maxPid = $thread->crawl_cursor_max_source_post_id;
         $endPageFetched = null;
+        $replyCountTotalFromDetail = null;
 
         $pageLimitEnd = $page + max(1, $maxPostPages) - 1;
 
@@ -493,6 +526,12 @@ class NgaLiteCrawler
 
             $fetchedPageCount++;
             $pageTotal = max($pageTotal, (int) $pageData['page_total']);
+            if ($replyCountTotalFromDetail === null && array_key_exists('reply_count_total', $pageData)) {
+                $replyCountCandidate = $pageData['reply_count_total'];
+                if (is_int($replyCountCandidate) && $replyCountCandidate >= 0) {
+                    $replyCountTotalFromDetail = $replyCountCandidate;
+                }
+            }
 
             $thread->crawl_page_total_last_seen = $pageTotal;
             $threadTitle = trim((string) ($pageData['thread_title'] ?? ''));
@@ -508,6 +547,10 @@ class NgaLiteCrawler
                 if (!$thread->is_skipped_by_page_total_limit) {
                     $thread->is_skipped_by_page_total_limit = true;
                     $thread->skipped_by_page_total_limit_at = $now;
+                }
+                if ($replyCountTotalFromDetail !== null) {
+                    // 业务规则：详情页提供的回复数更可信，用于纠正列表页 reply_count_display
+                    $thread->reply_count_display = $replyCountTotalFromDetail;
                 }
                 $thread->crawl_backfill_next_page_number = null;
                 $thread->is_truncated_by_page_limit = true;
@@ -619,6 +662,14 @@ class NgaLiteCrawler
         $endPageFetched = $endPageFetched ?? $startPage;
         $hasMorePages = $endPageFetched < $pageTotal;
 
+        $resolvedReplyCountDisplay = null;
+        if ($replyCountTotalFromDetail !== null) {
+            $resolvedReplyCountDisplay = $replyCountTotalFromDetail;
+        } elseif (!$hasMorePages && $maxFloor !== null) {
+            // 业务规则：当抓到最后一页时，最大楼层号即为“回复数”（不含楼主 0 楼）
+            $resolvedReplyCountDisplay = max(0, (int) $maxFloor);
+        }
+
         $thread->fill([
             'last_crawled_at' => $now,
             'crawl_cursor_max_floor_number' => $maxFloor,
@@ -629,6 +680,10 @@ class NgaLiteCrawler
             'truncated_at_page_number' => $hasMorePages ? $endPageFetched : null,
             // 分段补齐游标：下次从最后抓到的页码+1开始
             'crawl_backfill_next_page_number' => $hasMorePages ? ($endPageFetched + 1) : null,
+            // 业务规则：回复数展示优先信任详情页口径；仅在“已抓到末页”时才用楼层号兜底
+            'reply_count_display' => $resolvedReplyCountDisplay === null
+                ? (int) $thread->reply_count_display
+                : $resolvedReplyCountDisplay,
         ]);
         $thread->save();
 
@@ -969,6 +1024,147 @@ class NgaLiteCrawler
         }
 
         return null;
+    }
+
+    /**
+     * 判断主题创建时间是否落在抓取窗口内。
+     *
+     * @param CarbonImmutable|null $createdAt 主题创建时间
+     * @param CarbonImmutable|null $windowStart 窗口起始时间
+     * @param CarbonImmutable|null $windowEnd 窗口结束时间
+     * @return bool 是否属于窗口
+     * 无副作用。
+     */
+    private function isThreadWithinWindow(
+        ?CarbonImmutable $createdAt,
+        ?CarbonImmutable $windowStart,
+        ?CarbonImmutable $windowEnd
+    ): bool {
+        $hasWindow = $windowStart !== null || $windowEnd !== null;
+        // 业务规则：未指定窗口时视为全部命中
+        if (!$hasWindow) {
+            return true;
+        }
+
+        // 业务规则：创建时间缺失时，避免误判导致漏抓
+        if (!$createdAt instanceof CarbonImmutable) {
+            return true;
+        }
+
+        // 业务规则：窗口起止都需参与判断，任一越界即视为不命中
+        $isBeforeWindowStart = $windowStart instanceof CarbonImmutable && $createdAt->lt($windowStart);
+        $isAfterWindowEnd = $windowEnd instanceof CarbonImmutable && $createdAt->gt($windowEnd);
+
+        return !$isBeforeWindowStart && !$isAfterWindowEnd;
+    }
+
+    /**
+     * 判断是否需要因窗口规则跳过主题详情抓取。
+     *
+     * @param CarbonImmutable|null $createdAt 主题创建时间
+     * @param CarbonImmutable|null $windowStart 窗口起始时间
+     * @param CarbonImmutable|null $windowEnd 窗口结束时间
+     * @return bool 是否跳过详情抓取
+     * 无副作用。
+     */
+    private function shouldSkipThreadDetailByWindow(
+        ?CarbonImmutable $createdAt,
+        ?CarbonImmutable $windowStart,
+        ?CarbonImmutable $windowEnd
+    ): bool {
+        $hasWindow = $windowStart !== null || $windowEnd !== null;
+        if (!$hasWindow) {
+            return false;
+        }
+
+        if (!$createdAt instanceof CarbonImmutable) {
+            return false;
+        }
+
+        $isInWindow = $this->isThreadWithinWindow($createdAt, $windowStart, $windowEnd);
+
+        // 业务规则：创建时间超出窗口的主题不抓取回复详情
+        return !$isInWindow;
+    }
+
+    /**
+     * 根据窗口规则决定主题详情抓取的页数上限。
+     *
+     * @param int $maxPostPages 原始页数上限
+     * @param CarbonImmutable|null $createdAt 主题创建时间
+     * @param CarbonImmutable|null $windowStart 窗口起始时间
+     * @param CarbonImmutable|null $windowEnd 窗口结束时间
+     * @return int 详情抓取页数上限
+     * 无副作用。
+     */
+    private function resolveThreadMaxPostPages(
+        int $maxPostPages,
+        ?CarbonImmutable $createdAt,
+        ?CarbonImmutable $windowStart,
+        ?CarbonImmutable $windowEnd
+    ): int {
+        $hasWindow = $windowStart !== null || $windowEnd !== null;
+        if (!$hasWindow) {
+            return $maxPostPages;
+        }
+
+        $isInWindow = $this->isThreadWithinWindow($createdAt, $windowStart, $windowEnd);
+
+        // 业务规则：窗口内主题需抓到最后一页，用跳过阈值作为安全上限
+        if ($isInWindow) {
+            return self::PAGE_TOTAL_SKIP_LIMIT;
+        }
+
+        return $maxPostPages;
+    }
+
+    /**
+     * 判断列表页是否满足“可停止翻页”的条件。
+     *
+     * @param array<int, array<string, mixed>> $threadsData 列表页解析结果
+     * @param CarbonImmutable|null $windowStart 窗口起始时间
+     * @param CarbonImmutable|null $windowEnd 窗口结束时间
+     * @return bool 是否可停止继续翻页
+     * 无副作用。
+     */
+    private function shouldStopListPagingByWindow(
+        array $threadsData,
+        ?CarbonImmutable $windowStart,
+        ?CarbonImmutable $windowEnd
+    ): bool {
+        $hasWindow = $windowStart !== null || $windowEnd !== null;
+        if (!$hasWindow) {
+            return false;
+        }
+
+        $hasNonPinnedThread = false;
+        $hasNonPinnedInWindow = false;
+        $hasNonPinnedOutOfWindow = false;
+
+        foreach ($threadsData as $threadData) {
+            $isPinned = (bool) ($threadData['is_pinned'] ?? false);
+            if ($isPinned) {
+                continue;
+            }
+
+            $hasNonPinnedThread = true;
+
+            $createdAt = $threadData['thread_created_at'] ?? null;
+            $createdAt = $createdAt instanceof CarbonImmutable ? $createdAt : null;
+            $isInWindow = $this->isThreadWithinWindow($createdAt, $windowStart, $windowEnd);
+
+            if ($isInWindow) {
+                $hasNonPinnedInWindow = true;
+                continue;
+            }
+
+            $hasNonPinnedOutOfWindow = true;
+        }
+
+        // 业务规则：当“非置顶主题”均已过窗口时，后续页无需继续抓取
+        $allNonPinnedOutOfWindow = $hasNonPinnedThread && !$hasNonPinnedInWindow && $hasNonPinnedOutOfWindow;
+
+        return $allNonPinnedOutOfWindow;
     }
 
     /**

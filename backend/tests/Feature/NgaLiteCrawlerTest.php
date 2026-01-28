@@ -70,6 +70,46 @@ class NgaLiteCrawlerTest extends TestCase
     }
 
     /**
+     * 验证主题抓取成功后会用详情页口径刷新 threads.reply_count_display。
+     *
+     * @return void
+     * 副作用：读写测试数据库。
+     */
+    public function test_crawl_updates_thread_reply_count_display_from_thread_detail(): void
+    {
+        $listPayload = $this->makeListPayload(7, [[
+            'tid' => 7101,
+            'title' => 'Reply count from detail',
+            'author' => 'Alice',
+            'author_id' => 501,
+            'post_time' => '2026-01-19 10:00:00',
+            'last_reply' => '2026-01-19 10:05:00',
+            // 列表口径可能不准：这里故意给 0，期望后续被详情页纠正
+            'reply_count' => 0,
+            'view_count' => 10,
+            'is_pinned' => 0,
+            'is_digest' => 0,
+        ]]);
+
+        $post1 = $this->makePostPayload(9201, 1, 'Alice', 501, '2026-01-19 10:00:00', 'Hello');
+        $post2 = $this->makePostPayload(9202, 2, 'Bob', 502, '2026-01-19 10:05:00', 'Reply 1');
+        $threadPayload = $this->makeThreadPayload(7101, 1, 1, [$post1, $post2]);
+
+        $client = new SequenceNgaLiteClient([$listPayload], [
+            7101 => [
+                1 => [$threadPayload],
+            ],
+        ]);
+        $crawler = $this->makeCrawler($client);
+
+        $crawler->crawlForum(7, 5, null, 1);
+
+        $thread = Thread::where('source_thread_id', 7101)->firstOrFail();
+        // 详情页抓到末页后，最大楼层号为 1（不含楼主 0 楼），应刷新展示回复数
+        $this->assertSame(1, $thread->reply_count_display);
+    }
+
+    /**
      * 验证楼层内容变化会写入历史版本（保存旧内容快照）。
      *
      * @return void
