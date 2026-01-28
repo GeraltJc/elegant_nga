@@ -166,6 +166,6 @@ export const fetchCrawlRun = (
  */
 export const fetchCrawlRunThreads = (
   runId: number,
-  params?: { page?: number; per_page?: number; only_failed?: boolean }
+  params?: { page?: number; per_page?: number; only_failed?: 0 | 1 }
 ): Promise<ApiListResponse<CrawlRunThread>> =>
   requestJson(`/api/crawl-runs/${runId}/threads`, params)

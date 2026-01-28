@@ -96,7 +96,8 @@ const loadThreads = async (id: number, page: number, failedOnly: boolean) => {
     const response = await fetchCrawlRunThreads(id, {
       page,
       per_page: perPage,
-      only_failed: failedOnly || undefined,
+      // 规则：后端仅接受 1/0，避免传 true/false 触发校验失败
+      only_failed: failedOnly ? 1 : undefined,
     })
     threads.value = response.data
     meta.value = response.meta

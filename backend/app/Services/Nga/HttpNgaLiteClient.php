@@ -45,8 +45,22 @@ class HttpNgaLiteClient implements NgaLiteClient
      */
     private const DEFAULT_RETRY_MAX_DELAY_MS = 5000;
 
+    /**
+     * 规则：访客拦截诊断日志最多保留的响应体字节数。
+     */
+    private const GUEST_BLOCKED_LOG_BODY_MAX_BYTES = 600;
+
+    /**
+     * 规则：访客初始化请求日志落盘路径。
+     */
+    private const GUEST_INIT_LOG_PATH = 'logs/nga-guest-init.log';
+
     private ?string $guestJs = null;
     private ?string $lastVisit = null;
+    /**
+     * 规则：访客身份标识，用于与 guestJs 组合验证访问权限。
+     */
+    private ?string $ngaPassportUid = null;
     /**
      * @var callable|null 请求尝试观察器，用于统计请求次数。
      */
@@ -141,10 +155,26 @@ class HttpNgaLiteClient implements NgaLiteClient
 
         $response = $this->request($path, $query, true);
         if ($this->isGuestBlocked($response)) {
+            $this->logGuestBlockedDiagnostics(
+                $response,
+                $this->buildUrl($path),
+                $query,
+                true,
+                'fetch_with_guest',
+                1
+            );
             // 遇到访客拦截时刷新 cookie 后重试一次
             $this->refreshGuestCookies();
             $response = $this->request($path, $query, true);
             if ($this->isGuestBlocked($response)) {
+                $this->logGuestBlockedDiagnostics(
+                    $response,
+                    $this->buildUrl($path),
+                    $query,
+                    true,
+                    'fetch_with_guest',
+                    2
+                );
                 throw $this->buildGuestBlockedException($response);
             }
         }
@@ -182,20 +212,62 @@ class HttpNgaLiteClient implements NgaLiteClient
     private function refreshGuestCookies(): void
     {
         // 首次访客访问用于获取 guestJs 与 lastvisit
-        $response = $this->request('thread.php', [
+        $path = 'thread.php';
+        $query = [
             'fid' => $this->forumId,
             'order_by' => 'postdatedesc',
-        ], false);
+        ];
+        $response = $this->request($path, $query, false);
+        // 业务规则：首次访客请求仅记录必要诊断字段，避免落盘敏感头信息
+        $this->logGuestInitResponse($response, $path, $query);
+        $tokens = $this->extractGuestTokensFromResponse($response);
+        $guestJs = $tokens['guest_js'];
+        $lastVisit = $tokens['last_visit'];
+        $passportUid = $tokens['passport_uid'];
 
         if ($this->isGuestBlocked($response)) {
+            $this->logGuestBlockedDiagnostics(
+                $response,
+                $this->buildUrl($path),
+                $query,
+                false,
+                'refresh_guest_cookies',
+                1
+            );
+            // 业务规则：若首响应已包含访客凭据，先尝试携带凭据进行一次验证
+            $hasRequiredTokens = $guestJs !== null && $lastVisit !== null;
+            if ($hasRequiredTokens) {
+                $this->applyGuestTokens($guestJs, $lastVisit, $passportUid);
+                $probeResponse = $this->request($path, $query, true);
+                $probeBlocked = $this->isGuestBlocked($probeResponse);
+                $probeSuccessful = $probeResponse->successful();
+                if (!$probeBlocked && $probeSuccessful) {
+                    return;
+                }
+                if ($probeBlocked) {
+                    $this->logGuestBlockedDiagnostics(
+                        $probeResponse,
+                        $this->buildUrl($path),
+                        $query,
+                        true,
+                        'refresh_guest_cookies_probe',
+                        1
+                    );
+                }
+            }
             // 被拦截时，刷新一次访客请求再尝试获取 cookie
-            $response = $this->request('thread.php', [
-                'fid' => $this->forumId,
-                'order_by' => 'postdatedesc',
-            ], false);
+            $response = $this->request($path, $query, false);
         }
 
         if ($this->isGuestBlocked($response)) {
+            $this->logGuestBlockedDiagnostics(
+                $response,
+                $this->buildUrl($path),
+                $query,
+                false,
+                'refresh_guest_cookies',
+                2
+            );
             throw $this->buildGuestBlockedException($response);
         }
 
@@ -203,8 +275,10 @@ class HttpNgaLiteClient implements NgaLiteClient
             throw $this->buildStatusFailureException($response);
         }
 
-        $guestJs = $this->extractGuestJs($response->body());
-        $lastVisit = $this->extractCookieValue($response, 'lastvisit');
+        $tokens = $this->extractGuestTokensFromResponse($response);
+        $guestJs = $tokens['guest_js'];
+        $lastVisit = $tokens['last_visit'];
+        $passportUid = $tokens['passport_uid'];
 
         if ($guestJs === null || $lastVisit === null) {
             throw new NgaRequestException(
@@ -214,8 +288,7 @@ class HttpNgaLiteClient implements NgaLiteClient
             );
         }
 
-        $this->guestJs = $guestJs;
-        $this->lastVisit = $lastVisit;
+        $this->applyGuestTokens($guestJs, $lastVisit, $passportUid);
     }
 
     /**
@@ -242,12 +315,18 @@ class HttpNgaLiteClient implements NgaLiteClient
                 ],
             ]);
         }
-        if ($withCookies && $this->guestJs !== null && $this->lastVisit !== null) {
-            // 访客身份通过 cookie 维持
-            $http = $http->withCookies([
+        // 业务规则：仅在具备完整访客凭据时携带 cookie
+        $shouldAttachCookies = $withCookies && $this->guestJs !== null && $this->lastVisit !== null;
+        if ($shouldAttachCookies) {
+            $cookies = [
                 'guestJs' => $this->guestJs,
                 'lastvisit' => $this->lastVisit,
-            ], 'nga.178.com');
+            ];
+            if ($this->ngaPassportUid !== null) {
+                $cookies['ngaPassportUid'] = $this->ngaPassportUid;
+            }
+
+            $http = $http->withCookies($cookies, 'nga.178.com');
         }
 
         $url = $this->buildUrl($path);
@@ -686,6 +765,245 @@ class HttpNgaLiteClient implements NgaLiteClient
     }
 
     /**
+     * 从响应中提取访客凭据。
+     *
+     * @param Response $response HTTP 响应
+     * @return array{guest_js:?string, last_visit:?string, passport_uid:?string} 访客凭据
+     * 无副作用。
+     */
+    private function extractGuestTokensFromResponse(Response $response): array
+    {
+        return [
+            // 业务规则：guestJs 来自响应体脚本，lastvisit 与 ngaPassportUid 来自响应头
+            'guest_js' => $this->extractGuestJs((string) $response->body()),
+            'last_visit' => $this->extractCookieValue($response, 'lastvisit'),
+            'passport_uid' => $this->extractCookieValue($response, 'ngaPassportUid'),
+        ];
+    }
+
+    /**
+     * 应用访客凭据到当前客户端。
+     *
+     * @param string $guestJs guestJs
+     * @param string $lastVisit lastvisit
+     * @param string|null $passportUid ngaPassportUid
+     * @return void
+     * 无副作用。
+     */
+    private function applyGuestTokens(string $guestJs, string $lastVisit, ?string $passportUid): void
+    {
+        $this->guestJs = $guestJs;
+        $this->lastVisit = $lastVisit;
+        $this->ngaPassportUid = $passportUid;
+    }
+
+    /**
+     * 记录首次访客请求的核心诊断字段，用于定位源站拦截行为。
+     *
+     * @param Response $response HTTP 响应
+     * @param string $path 请求路径
+     * @param array<string, mixed> $query Query 参数
+     * @return void
+     * 副作用：写入诊断日志文件。
+     */
+    private function logGuestInitResponse(Response $response, string $path, array $query): void
+    {
+        $tokens = $this->extractGuestTokensFromResponse($response);
+        $payload = [
+            'ts' => now('Asia/Shanghai')->toDateTimeString(),
+            'url' => $this->buildUrl($path),
+            'query' => $query,
+            'status' => $response->status(),
+            // 业务含义：记录访客标识与脚本令牌，便于核对拦截策略
+            'ngaPassportUid' => $tokens['passport_uid'] ?? '',
+            'guestJs' => $tokens['guest_js'] ?? '',
+        ];
+        $logLine = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        if (!is_string($logLine)) {
+            $logLine = '{"error":"encode_failed"}';
+        }
+
+        $logPath = storage_path(self::GUEST_INIT_LOG_PATH);
+        @file_put_contents($logPath, $logLine.PHP_EOL, FILE_APPEND);
+    }
+
+    /**
+     * 记录访客拦截的响应诊断信息，便于定位源站拦截原因。
+     *
+     * @param Response $response HTTP 响应
+     * @param string $url 请求 URL
+     * @param array<string, mixed> $query Query 参数
+     * @param bool $withCookies 是否携带 cookie
+     * @param string $stage 触发阶段标记
+     * @param int $attempt 同阶段尝试次数
+     * @return void
+     * 副作用：写入应用日志。
+     */
+    private function logGuestBlockedDiagnostics(
+        Response $response,
+        string $url,
+        array $query,
+        bool $withCookies,
+        string $stage,
+        int $attempt
+    ): void {
+        $rawBody = (string) $response->body();
+        $rawBodyBytes = strlen($rawBody);
+        $charset = $this->resolveResponseCharset($response, $rawBody);
+        $decodedBody = $this->convertBodyToUtf8($rawBody, $charset);
+        $bodyPreview = $this->truncateBody($decodedBody);
+
+        // 业务规则：诊断日志仅保留必要头信息，避免记录敏感 cookie
+        $headers = [
+            'Content-Type' => $this->normalizeHeaderValue($response->header('Content-Type')),
+            'X-NGA-CONTENT-TYPE' => $this->normalizeHeaderValue($response->header('X-NGA-CONTENT-TYPE')),
+            'X-NGA-SERVER' => $this->normalizeHeaderValue($response->header('X-NGA-SERVER')),
+            'Server' => $this->normalizeHeaderValue($response->header('Server')),
+            'Cache-Control' => $this->normalizeHeaderValue($response->header('Cache-Control')),
+        ];
+
+        Log::warning('NGA guest blocked diagnostics', [
+            'stage' => $stage,
+            'attempt' => $attempt,
+            'url' => $url,
+            'query' => $query,
+            'with_cookies' => $withCookies,
+            'status' => $response->status(),
+            'charset' => $charset,
+            'body_bytes' => $rawBodyBytes,
+            'body_preview' => $bodyPreview,
+            'body_preview_truncated' => $bodyPreview !== $decodedBody,
+            'headers' => $headers,
+        ]);
+    }
+
+    /**
+     * 解析响应字符集，优先读取响应头，再从 HTML 头部兜底提取。
+     *
+     * @param Response $response HTTP 响应
+     * @param string $body 原始响应体
+     * @return string 规范化后的字符集
+     * 无副作用。
+     */
+    private function resolveResponseCharset(Response $response, string $body): string
+    {
+        $contentType = $this->normalizeHeaderValue($response->header('Content-Type'));
+        $charset = $this->extractCharsetFromContentType($contentType);
+        if ($charset !== null) {
+            return $charset;
+        }
+
+        $charsetFromBody = $this->extractCharsetFromBody($body);
+        if ($charsetFromBody !== null) {
+            return $charsetFromBody;
+        }
+
+        return 'UTF-8';
+    }
+
+    /**
+     * 尝试将响应体转换为 UTF-8，失败时返回原始内容。
+     *
+     * @param string $body 原始响应体
+     * @param string $charset 响应字符集
+     * @return string 转换后的响应体
+     * 无副作用。
+     */
+    private function convertBodyToUtf8(string $body, string $charset): string
+    {
+        $normalizedCharset = strtoupper($charset);
+        if ($normalizedCharset === 'UTF-8' || $normalizedCharset === 'UTF8') {
+            return $body;
+        }
+
+        if (!function_exists('mb_convert_encoding')) {
+            return $body;
+        }
+
+        $converted = @mb_convert_encoding($body, 'UTF-8', $charset);
+        if (!is_string($converted) || $converted === '') {
+            return $body;
+        }
+
+        return $converted;
+    }
+
+    /**
+     * 截断响应体预览，避免日志过大。
+     *
+     * @param string $body 响应体（UTF-8）
+     * @return string 预览内容
+     * 无副作用。
+     */
+    private function truncateBody(string $body): string
+    {
+        $maxBytes = self::GUEST_BLOCKED_LOG_BODY_MAX_BYTES;
+        $bodyBytes = strlen($body);
+
+        if ($bodyBytes <= $maxBytes) {
+            return $body;
+        }
+
+        return substr($body, 0, $maxBytes);
+    }
+
+    /**
+     * 规范化响应头值，统一转为字符串，避免数组污染日志。
+     *
+     * @param mixed $value 响应头原始值
+     * @return string|null 规范化后的值
+     * 无副作用。
+     */
+    private function normalizeHeaderValue(mixed $value): ?string
+    {
+        if (is_array($value)) {
+            return $value[0] ?? null;
+        }
+
+        if (is_string($value) && $value !== '') {
+            return $value;
+        }
+
+        return null;
+    }
+
+    /**
+     * 从 Content-Type 头部解析字符集。
+     *
+     * @param string|null $contentType Content-Type 头值
+     * @return string|null 字符集（大写）
+     * 无副作用。
+     */
+    private function extractCharsetFromContentType(?string $contentType): ?string
+    {
+        if ($contentType === null) {
+            return null;
+        }
+
+        if (preg_match('/charset=([a-zA-Z0-9\\-]+)/i', $contentType, $matches) !== 1) {
+            return null;
+        }
+
+        return strtoupper($matches[1]);
+    }
+
+    /**
+     * 从响应体中解析 HTML 声明的字符集。
+     *
+     * @param string $body 原始响应体
+     * @return string|null 字符集（大写）
+     * 无副作用。
+     */
+    private function extractCharsetFromBody(string $body): ?string
+    {
+        if (preg_match('/charset=([a-zA-Z0-9\\-]+)/i', $body, $matches) !== 1) {
+            return null;
+        }
+
+        return strtoupper($matches[1]);
+    }
+
+    /**
      * 解析连接超时（秒）。
      *
      * @return float
@@ -845,8 +1163,17 @@ class HttpNgaLiteClient implements NgaLiteClient
 
         $parts = ['curl '.escapeshellarg($fullUrl)];
 
-        if ($withCookies && $this->guestJs !== null && $this->lastVisit !== null) {
-            $cookie = 'lastvisit='.$this->lastVisit.'; guestJs='.$this->guestJs;
+        // 业务规则：回放 curl 时同步访客凭据，便于复现拦截场景
+        $shouldAttachCookies = $withCookies && $this->guestJs !== null && $this->lastVisit !== null;
+        if ($shouldAttachCookies) {
+            $cookieParts = [
+                'lastvisit='.$this->lastVisit,
+                'guestJs='.$this->guestJs,
+            ];
+            if ($this->ngaPassportUid !== null) {
+                $cookieParts[] = 'ngaPassportUid='.$this->ngaPassportUid;
+            }
+            $cookie = implode('; ', $cookieParts);
             $parts[] = '-b '.escapeshellarg($cookie);
         }
 

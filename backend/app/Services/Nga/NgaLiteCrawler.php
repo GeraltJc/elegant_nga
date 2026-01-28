@@ -125,6 +125,9 @@ class NgaLiteCrawler
             while (true) {
                 try {
                     $threadsData = $this->listParser->parse($this->client->fetchList($fid, $currentPage));
+                } catch (NgaRequestException $exception) {
+                    // 业务规则：请求失败应保留原始错误类型，便于区分拦截与解析问题
+                    throw $exception;
                 } catch (Throwable $exception) {
                     throw new NgaParseException(
                         CrawlErrorSummary::PARSE_LIST_FAILED,
@@ -516,6 +519,9 @@ class NgaLiteCrawler
         while ($page <= $pageLimitEnd) {
             try {
                 $pageData = $this->threadParser->parse($this->client->fetchThread($thread->source_thread_id, $page));
+            } catch (NgaRequestException $exception) {
+                // 业务规则：请求失败不视为解析失败，交由上层归类为请求错误
+                throw $exception;
             } catch (Throwable $exception) {
                 throw new NgaParseException(
                     CrawlErrorSummary::PARSE_THREAD_FAILED,
