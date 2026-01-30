@@ -188,9 +188,45 @@ composer install
 cp -n .env.example .env
 php artisan key:generate
 php artisan migrate
+php artisan config:clear
 ```
 
 说明：后端不再依赖 Node（不包含 backend/package.json/Vite）。Node 仅用于 frontend。
+
+#### HTMLPurifier 缓存刷新（规则变更时）
+
+当你修改 HTML 清洗规则（白名单/自定义属性）时，需要刷新 HTMLPurifier 的定义缓存，完整步骤如下：
+
+1) 更新环境变量（递增版本号）：
+
+```bash
+# backend/.env
+NGA_HTMLPURIFIER_DEFINITION_REV=2
+```
+
+2) 清理或重建配置缓存：
+
+Docker 方式：
+
+```bash
+docker compose exec php php artisan config:clear
+```
+
+3) 可选：删除 HTMLPurifier 定义缓存文件（确保立即生效）：
+
+Docker 方式：
+
+```bash
+docker compose exec php rm -rf storage/framework/cache/htmlpurifier
+```
+
+#### ECS 一键部署脚本
+
+```bash
+bash scripts/deploy-ecs.sh
+```
+
+说明：脚本依赖 `flock`（通常由 util-linux 提供）实现部署互斥锁；缺少时会直接退出。
 
 ### 3) 初始化前端（Vue 3 + Vite）
 
