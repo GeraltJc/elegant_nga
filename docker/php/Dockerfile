@@ -11,7 +11,7 @@ RUN set -eux; \
   sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
-    git unzip \
+    git unzip procps \
     libonig-dev libzip-dev libicu-dev \
     libpng-dev libjpeg62-turbo-dev libfreetype6-dev; \
   rm -rf /var/lib/apt/lists/*
