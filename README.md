@@ -18,11 +18,15 @@ NGA「艾泽拉斯议事厅」（fid=7）抓取与浏览站点。
 
 - 版块抓取：`nga:crawl-lite`
 - 单主题抓取：`nga:crawl-thread`
+- 缺楼层审计/修补：`nga:audit-missing-floors`
 
 Docker 环境下推荐这样执行（在宿主机上）：
 
 ```bash
 docker compose exec php php artisan nga:crawl-lite --fid=7 --recent-days=3
+
+# 缺楼层审计（可选修补）
+docker compose exec php php artisan nga:audit-missing-floors --thread-ids=46101568 --repair
 ```
 
 本地非 Docker 方式（直接运行后端）：
@@ -163,6 +167,9 @@ php backend/artisan nga:crawl-lite --fid=7 --recent-days=0 --list-page=1
 
 - 运行报表列表：`http://localhost:5173/crawl-runs`
 - 运行报表详情：`http://localhost:5173/crawl-runs/{runId}`
+- 缺楼层审计列表：`http://localhost:5173/floor-audit-runs`
+- 缺楼层审计详情：`http://localhost:5173/floor-audit-runs/{runId}`
+- 缺楼层楼层明细：`http://localhost:5173/floor-audit-threads/{auditThreadId}`
 
 ## 开发环境（Docker，Mac M2）
 
@@ -271,3 +278,11 @@ npm test
 - 工作流：`.github/workflows/ci.yml`
 - 后端：`composer install` → `php artisan migrate` → `php artisan test`（SQLite）
 - 前端：`npm ci` → `npm test` → `npm run build`
+
+补充说明（测试环境）：
+- `phpunit.xml` 已指定 SQLite + `APP_CONFIG_CACHE` 临时路径，测试不会命中 `bootstrap/cache/config.php`，无需再手动 `config:clear`。
+
+### MySQL 日志（general_log）
+为便于定位误操作，已在 `docker/mysql/my.cnf` 开启 general_log（写入 `/var/lib/mysql/general.log`）。
+
+- 注意：general_log 会持续增长，建议在问题排查后关闭或做日志轮转。

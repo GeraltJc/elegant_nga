@@ -483,6 +483,275 @@ class NgaLiteCrawler
     }
 
     /**
+     * 仅抓取指定页码集合，用于缺楼层修补（限制抓取次数，避免顺带拉新过多数据）。
+     *
+     * 说明：
+     * - 该流程只会 upsert “<= capMaxFloorNumber”的楼层，避免把新回复楼层顺带写入。
+     * - 不更新 threads 的游标/截断标记，减少对后续增量策略的副作用。
+     *
+     * @param int $tid 主题 tid
+     * @param array<int, int> $pages 需要抓取的页码集合（1基）
+     * @param int $capMaxFloorNumber 修补上限最大楼层号（0基）
+     * @param string $runTriggerText 运行触发来源
+     * @return array{
+     *     thread:int,
+     *     posts:int,
+     *     run_id:int|null,
+     *     run_started_at:string|null,
+     *     run_finished_at:string|null,
+     *     date_window_start:string|null,
+     *     date_window_end:string|null,
+     *     thread_scanned_count:int,
+     *     thread_change_detected_count:int,
+     *     thread_updated_count:int,
+     *     http_request_count:int,
+     *     new_post_count:int,
+     *     updated_post_count:int,
+     *     failed_thread_count:int,
+     *     duration_ms:int|null
+     * } 写入数量统计与运行汇总
+     * 副作用：写入 posts 以及抓取审计表。
+     */
+    public function repairThreadMissingFloorsByPages(
+        int $tid,
+        array $pages,
+        int $capMaxFloorNumber,
+        string $runTriggerText = 'floor_audit'
+    ): array {
+        $now = CarbonImmutable::now('Asia/Shanghai');
+        $thread = Thread::firstOrNew([
+            'source_thread_id' => $tid,
+        ]);
+
+        if (!$thread->exists) {
+            $thread->forum_id = $this->getOrCreateForumId();
+            $thread->thread_created_at = $now;
+            $thread->author_name = 'unknown';
+            $thread->title = (string) $tid;
+            $thread->save();
+        }
+
+        $forum = Forum::query()->find($thread->forum_id);
+        if (!$forum instanceof Forum) {
+            $forumId = $this->getOrCreateForumId();
+            $forum = Forum::query()->find($forumId);
+        }
+
+        $runRecorder = new CrawlRunRecorder();
+        $run = $runRecorder->startRun(
+            $forum?->id ?? $this->getOrCreateForumId(),
+            $runTriggerText,
+            null,
+            null,
+            $now
+        );
+        if ($forum instanceof Forum) {
+            $this->configureHttpClientIfSupported($forum, $runRecorder);
+        }
+
+        $runRecorder->increaseThreadScannedCount();
+        $runThread = $runRecorder->startThread(
+            $run,
+            $thread,
+            false,
+            null,
+            CarbonImmutable::now('Asia/Shanghai')
+        );
+
+        $threadCount = 0;
+        $postCount = 0;
+
+        $normalizedPages = array_values(array_unique(array_filter(array_map('intval', $pages), fn (int $p): bool => $p > 0)));
+        sort($normalizedPages);
+        if ($normalizedPages === []) {
+            $normalizedPages = [1];
+        }
+
+        try {
+            $processResult = $this->crawlThreadSpecifiedPages(
+                $thread,
+                $normalizedPages,
+                max(0, $capMaxFloorNumber),
+                $now,
+                $runThread->id
+            );
+
+            $threadCount = 1;
+            $postCount = $processResult['posts'];
+            $runRecorder->increaseThreadUpdatedCount();
+            $runRecorder->increaseNewPostCount($processResult['new_posts']);
+            $runRecorder->increaseUpdatedPostCount($processResult['updated_posts']);
+            $runRecorder->markThreadSuccess(
+                $runThread,
+                CarbonImmutable::now('Asia/Shanghai'),
+                $processResult['fetched_pages'],
+                false,
+                $processResult['new_posts'],
+                $processResult['updated_posts']
+            );
+        } catch (Throwable $exception) {
+            $runRecorder->increaseFailedThreadCount();
+            $failure = $this->resolveThreadFailure($exception);
+            $runRecorder->markThreadFailure(
+                $runThread,
+                CarbonImmutable::now('Asia/Shanghai'),
+                $failure['http_error_code'],
+                $failure['summary']
+            );
+        } finally {
+            $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
+        }
+
+        return [
+            'thread' => $threadCount,
+            'posts' => $postCount,
+            ...$runRecorder->getSummary(),
+        ];
+    }
+
+    /**
+     * 抓取指定页码集合并 upsert 楼层数据（带楼层上限）。
+     *
+     * @param Thread $thread 主题模型
+     * @param array<int, int> $pages 页码集合（1基）
+     * @param int $capMaxFloorNumber 修补上限最大楼层号（0基）
+     * @param CarbonImmutable $now 抓取时刻
+     * @param int|null $crawlRunThreadId 抓取明细 ID
+     * @return array{posts:int, new_posts:int, updated_posts:int, fetched_pages:int}
+     * 副作用：写入 posts 与 post_revisions。
+     */
+    private function crawlThreadSpecifiedPages(
+        Thread $thread,
+        array $pages,
+        int $capMaxFloorNumber,
+        CarbonImmutable $now,
+        ?int $crawlRunThreadId
+    ): array {
+        $postsUpserted = 0;
+        $newPostCount = 0;
+        $updatedPostCount = 0;
+        $fetchedPageCount = 0;
+        $knownPageTotal = null;
+
+        foreach ($pages as $page) {
+            if ($page <= 0) {
+                // 业务规则：页码必须为正整数，避免无效请求
+                continue;
+            }
+            if ($knownPageTotal !== null && $page > $knownPageTotal) {
+                // 业务规则：页码已排序，超过已知总页数的后续页均不再请求，避免无意义请求
+                break;
+            }
+
+            try {
+                $pageData = $this->threadParser->parse($this->client->fetchThread($thread->source_thread_id, $page));
+            } catch (NgaRequestException $exception) {
+                throw $exception;
+            } catch (Throwable $exception) {
+                throw new NgaParseException(
+                    CrawlErrorSummary::PARSE_THREAD_FAILED,
+                    $exception->getMessage(),
+                    $exception
+                );
+            }
+
+            $fetchedPageCount++;
+            $pageTotal = (int) ($pageData['page_total'] ?? 0);
+            if ($pageTotal > 0) {
+                $knownPageTotal = $knownPageTotal === null ? $pageTotal : max($knownPageTotal, $pageTotal);
+            }
+
+            $threadTitle = trim((string) ($pageData['thread_title'] ?? ''));
+
+            foreach ($pageData['posts'] as $postData) {
+                $sourcePostId = (int) ($postData['source_post_id'] ?? 0);
+                $floorNumber = (int) ($postData['floor_number'] ?? 0);
+                if ($floorNumber < 0) {
+                    continue;
+                }
+                if ($floorNumber > $capMaxFloorNumber) {
+                    // 业务规则：仅补齐缺口范围内楼层，避免把新回复楼层顺带写入
+                    continue;
+                }
+                if ($sourcePostId <= 0) {
+                    $sourcePostId = $floorNumber;
+                }
+
+                $content = (string) ($postData['content_raw'] ?? '');
+                $contentFormat = (string) ($postData['content_format'] ?? 'ubb');
+                $contentHtml = $this->contentProcessor->toSafeHtml($content, $contentFormat);
+                if ($floorNumber === 0 && $threadTitle !== '') {
+                    $contentHtml = $this->stripLeadingThreadTitle($contentHtml, $threadTitle);
+                }
+                $fingerprint = hash('sha256', $content);
+
+                $post = $this->findPostForUpsert($thread, $sourcePostId, $floorNumber);
+
+                $wasExisting = $post->exists;
+                $previousSnapshot = $this->buildPostSnapshot($post);
+                $currentDeleted = (bool) ($postData['is_deleted_by_source'] ?? false);
+                $currentFolded = (bool) ($postData['is_folded_by_source'] ?? false);
+                $sourceEditedAt = $postData['source_edited_at'] ?? null;
+
+                $post->fill([
+                    'source_post_id' => $sourcePostId,
+                    'floor_number' => $floorNumber,
+                    'author_name' => $postData['author_name'],
+                    'author_source_user_id' => $postData['author_source_user_id'],
+                    'post_created_at' => $postData['post_created_at'],
+                    'content_html' => $contentHtml,
+                    // 业务规则：指纹必须基于原始内容，避免清洗导致误判
+                    'content_fingerprint_sha256' => $fingerprint,
+                    'is_deleted_by_source' => $currentDeleted,
+                    'is_folded_by_source' => $currentFolded,
+                ]);
+
+                $changeEvaluation = $this->evaluatePostChanges(
+                    $wasExisting,
+                    $previousSnapshot,
+                    $fingerprint,
+                    $currentDeleted,
+                    $currentFolded
+                );
+
+                if ($changeEvaluation['should_record_revision']) {
+                    // 业务规则：仅对“已有楼层”的变化写入历史版本
+                    $this->recordPostRevision(
+                        $post,
+                        $previousSnapshot,
+                        $now,
+                        $sourceEditedAt,
+                        $changeEvaluation['reasons'],
+                        $crawlRunThreadId
+                    );
+                }
+
+                if ($changeEvaluation['has_any_change']) {
+                    // 业务规则：新增或变更都要刷新“内容最后变化时间”
+                    $post->content_last_changed_at = $now;
+                }
+
+                $post->save();
+                if ($changeEvaluation['has_any_change']) {
+                    $postsUpserted++;
+                    if (!$wasExisting) {
+                        $newPostCount++;
+                    } else {
+                        $updatedPostCount++;
+                    }
+                }
+            }
+        }
+
+        return [
+            'posts' => $postsUpserted,
+            'new_posts' => $newPostCount,
+            'updated_posts' => $updatedPostCount,
+            'fetched_pages' => $fetchedPageCount,
+        ];
+    }
+
+    /**
      * 抓取主题的一个分页片段，并更新楼层游标与截断标记。
      *
      * @param Thread $thread 主题模型

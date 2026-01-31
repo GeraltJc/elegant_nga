@@ -5,6 +5,7 @@
       <nav class="app-nav">
         <RouterLink to="/">主题列表</RouterLink>
         <RouterLink to="/crawl-runs">运行报表</RouterLink>
+        <RouterLink to="/floor-audit-runs">缺楼层审计</RouterLink>
       </nav>
     </header>
     <main class="app-main">

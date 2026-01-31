@@ -20,6 +20,11 @@
     <php>
         <env name="APP_ENV" value="testing"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="APP_CONFIG_CACHE" value="/tmp/laravel-config-testing.php"/>
+        <env name="APP_EVENTS_CACHE" value="/tmp/laravel-events-testing.php"/>
+        <env name="APP_PACKAGES_CACHE" value="/tmp/laravel-packages-testing.php"/>
+        <env name="APP_ROUTES_CACHE" value="/tmp/laravel-routes-testing.php"/>
+        <env name="APP_SERVICES_CACHE" value="/tmp/laravel-services-testing.php"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>

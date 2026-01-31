@@ -89,6 +89,59 @@ export type CrawlRunThread = {
   finished_at: string | null
 }
 
+export type FloorAuditRunSummary = {
+  id: number
+  run_started_at: string | null
+  run_finished_at: string | null
+  run_trigger_text: string
+  repair_enabled: boolean
+  total_thread_count: number
+  missing_thread_count: number
+  repaired_thread_count: number
+  partial_thread_count: number
+  failed_thread_count: number
+  failed_http_count: number
+  failed_parse_count: number
+  failed_db_count: number
+  failed_unknown_count: number
+}
+
+export type FloorAuditRunDetail = FloorAuditRunSummary & {
+  duration_ms: number | null
+}
+
+export type FloorAuditThread = {
+  id: number
+  audit_run_id: number
+  thread_id: number
+  source_thread_id: number
+  max_floor_number: number
+  post_count: number
+  missing_floor_count: number
+  ignored_floor_count: number
+  repair_status: string
+  repair_crawl_run_id: number | null
+  repair_attempted_at: string | null
+  repair_finished_at: string | null
+  repair_after_max_floor_number: number | null
+  repair_after_post_count: number | null
+  repair_remaining_floor_count: number | null
+  repair_error_category: string | null
+  repair_http_error_code: number | null
+  repair_error_summary: string | null
+}
+
+export type FloorAuditPost = {
+  id: number
+  floor_number: number
+  repair_status: string
+  attempt_count_before: number
+  attempt_count_after: number | null
+  repair_error_category: string | null
+  repair_http_error_code: number | null
+  repair_error_summary: string | null
+}
+
 type QueryValue = string | number | boolean | null | undefined
 
 const buildQuery = (params?: Record<string, QueryValue>): string => {
@@ -169,3 +222,45 @@ export const fetchCrawlRunThreads = (
   params?: { page?: number; per_page?: number; only_failed?: 0 | 1 }
 ): Promise<ApiListResponse<CrawlRunThread>> =>
   requestJson(`/api/crawl-runs/${runId}/threads`, params)
+
+/**
+ * 获取缺楼层审计运行列表（分页）。
+ */
+export const fetchFloorAuditRuns = (
+  params?: { page?: number; per_page?: number }
+): Promise<ApiListResponse<FloorAuditRunSummary>> =>
+  requestJson('/api/floor-audit-runs', params)
+
+/**
+ * 获取缺楼层审计运行详情。
+ */
+export const fetchFloorAuditRun = (
+  runId: number
+): Promise<ApiItemResponse<FloorAuditRunDetail>> =>
+  requestJson(`/api/floor-audit-runs/${runId}`)
+
+/**
+ * 获取缺楼层审计主题明细（分页）。
+ */
+export const fetchFloorAuditRunThreads = (
+  runId: number,
+  params?: { page?: number; per_page?: number; only_failed?: 0 | 1; repair_status?: string }
+): Promise<ApiListResponse<FloorAuditThread>> =>
+  requestJson(`/api/floor-audit-runs/${runId}/threads`, params)
+
+/**
+ * 获取缺楼层审计主题详情。
+ */
+export const fetchFloorAuditThread = (
+  auditThreadId: number
+): Promise<ApiItemResponse<FloorAuditThread>> =>
+  requestJson(`/api/floor-audit-threads/${auditThreadId}`)
+
+/**
+ * 获取缺楼层审计楼层明细（分页）。
+ */
+export const fetchFloorAuditThreadPosts = (
+  auditThreadId: number,
+  params?: { page?: number; per_page?: number; repair_status?: string }
+): Promise<ApiListResponse<FloorAuditPost>> =>
+  requestJson(`/api/floor-audit-threads/${auditThreadId}/posts`, params)

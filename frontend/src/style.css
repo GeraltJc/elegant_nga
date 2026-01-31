@@ -250,6 +250,22 @@ a {
   margin: 16px 0;
 }
 
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #374151;
+  font-size: 14px;
+}
+
+.filter-select {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: #111827;
+}
+
 .section-title {
   margin: 0;
   font-size: 18px;
