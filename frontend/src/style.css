@@ -464,6 +464,7 @@ a {
   margin: 8px 0;
   padding: 8px 12px;
   background: #f3f4f6;
+  border-left: 4px solid #c7d2fe;
   border-radius: 8px;
 }
 
@@ -492,6 +493,7 @@ a {
   margin: 8px 0;
   padding: 8px 12px;
   background: #f3f4f6;
+  border-left: 4px solid #c7d2fe;
   border-radius: 8px;
 }
 
@@ -505,6 +507,65 @@ a {
 
 .post-content a {
   color: #2563eb;
+}
+
+.post-content .image-toggle,
+.revision-content .image-toggle {
+  margin: 4px 0;
+}
+
+.post-content blockquote .image-toggle,
+.revision-content blockquote .image-toggle {
+  margin: 2px 0;
+}
+
+.image-toggle-summary {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 999px;
+  font-size: 12px;
+  list-style: none;
+  user-select: none;
+}
+
+.image-toggle[open] .image-toggle-summary {
+  background: #e0e7ff;
+}
+
+.image-toggle-summary::-webkit-details-marker {
+  display: none;
+}
+
+.image-toggle-summary::marker {
+  content: '';
+}
+
+.post-content blockquote .image-toggle-summary,
+.revision-content blockquote .image-toggle-summary {
+  padding: 2px 6px;
+}
+
+.image-toggle img {
+  max-width: 100%;
+  height: auto;
+  margin-top: 6px;
+  display: block;
+}
+
+.post-content blockquote .image-toggle img,
+.revision-content blockquote .image-toggle img {
+  margin-top: 4px;
+}
+
+.nga-ubb-uid,
+.nga-ubb-pid {
+  color: #1d4ed8;
+  font-weight: 600;
 }
 
 .link {

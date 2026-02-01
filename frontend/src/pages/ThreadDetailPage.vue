@@ -25,8 +25,11 @@ const errorMessage = ref('')
 const postsError = ref('')
 
 const currentPage = ref(1)
+// 业务含义：楼层列表每页拉取数量
 const perPage = 30
+// 业务含义：历史版本列表每页拉取数量
 const revisionPerPage = 5
+// 业务含义：NGA 附件图片的基准域名
 const imageBaseUrl = 'https://img.nga.178.com/attachments'
 
 type RevisionState = {
@@ -42,6 +45,9 @@ const revisionStates = ref<Record<number, RevisionState>>({})
 
 /**
  * 标准化图片地址，补齐附件域名。
+ *
+ * @param src 原始图片地址
+ * @return 规范化后的图片地址
  */
 const normalizeImageSrc = (src: string) => {
   const trimmed = src.trim()
@@ -56,27 +62,141 @@ const normalizeImageSrc = (src: string) => {
 }
 
 /**
- * 标准化楼层 HTML 内容，补齐图片地址与基础标签兼容处理。
+ * 将 UBB 引用标签转换为区块引用，提升阅读可读性。
+ *
+ * @param html 原始楼层 HTML 字符串
+ * @return 处理后的 HTML 字符串
  */
-const normalizePostHtml = (html: string) => {
+const normalizeQuoteTags = (html: string): string => {
+  if (html === '') {
+    return html
+  }
+  const normalized = html
+    .replace(/\[quote(?:=[^\]]+)?\]/gi, '<blockquote class="nga-quote">')
+    .replace(/\[\/quote\]/gi, '</blockquote>')
+  return normalized
+}
+
+/**
+ * 将常见 UBB 简单排版标签转换为等价 HTML。
+ *
+ * @param html 原始楼层 HTML 字符串
+ * @return 处理后的 HTML 字符串
+ */
+const normalizeSimpleUbbTags = (html: string): string => {
+  if (html === '') {
+    return html
+  }
+  // 业务规则：仅转换基础排版标签，避免引入复杂结构与额外风险
+  const tagMap: Record<string, string> = {
+    b: 'strong',
+    i: 'em',
+    u: 'u',
+    s: 's',
+    del: 'del',
+  }
   let output = html
-  output = output.replace(/\[img\]([\s\S]*?)\[\/img\]/gi, (_, rawSrc: string) => {
-    const normalized = normalizeImageSrc(rawSrc)
-    const safeSrc = normalized.replace(/"/g, '&quot;')
-    return `<img src="${safeSrc}" alt="" loading="lazy" referrerpolicy="no-referrer">`
-  })
-  output = output.replace(/<img\b([^>]*?)\bsrc=(['"])([^'"]+)\2([^>]*)>/gi, (match, before, quote, src, after) => {
-    const normalized = normalizeImageSrc(src)
-    if (normalized === src) {
-      return match
-    }
-    return `<img${before}src=${quote}${normalized}${quote}${after}>`
+  Object.entries(tagMap).forEach(([ubbTag, htmlTag]) => {
+    const openTag = new RegExp(`\\[${ubbTag}\\]`, 'gi')
+    const closeTag = new RegExp(`\\[\\/${ubbTag}\\]`, 'gi')
+    output = output.replace(openTag, `<${htmlTag}>`).replace(closeTag, `</${htmlTag}>`)
   })
   return output
 }
 
 /**
+ * 将 [uid]/[pid] 标签降级为可读文本，避免残留 UBB 标记影响阅读。
+ *
+ * @param html 原始楼层 HTML 字符串
+ * @return 处理后的 HTML 字符串
+ */
+const normalizeUbbMetaTags = (html: string): string => {
+  if (html === '') {
+    return html
+  }
+  let output = html
+  output = output.replace(/\[uid=(\d+)\]([\s\S]*?)\[\/uid\]/gi, (_, uid: string, name: string) => {
+    const safeUid = uid.replace(/"/g, '&quot;')
+    return `<span class="nga-ubb-uid" data-uid="${safeUid}">${name}</span>`
+  })
+  output = output.replace(
+    /\[pid=(\d+)(?:,(\d+))?(?:,(\d+))?\]([\s\S]*?)\[\/pid\]/gi,
+    (_, pid: string, tid: string | undefined, page: string | undefined, text: string) => {
+      const safePid = pid.replace(/"/g, '&quot;')
+      const safeTid = tid ? tid.replace(/"/g, '&quot;') : ''
+      const safePage = page ? page.replace(/"/g, '&quot;') : ''
+      // 业务规则：仅保留文本与数据标记，避免误导为可直接跳转的链接
+      // 业务含义：保留 pid/tid/page 便于后续扩展跳转能力
+      return `<span class="nga-ubb-pid" data-pid="${safePid}" data-tid="${safeTid}" data-page="${safePage}">${text}</span>`
+    }
+  )
+  return output
+}
+
+/**
+ * 构造“点击展开”的图片结构，避免长图直接撑高楼层。
+ *
+ * @param imgHtml 已生成的图片 HTML
+ * @return 包装后的 HTML 字符串
+ */
+const buildImageToggleHtml = (imgHtml: string): string => {
+  // 业务含义：图片默认折叠时的提示文案
+  const summaryText = '点击查看图片'
+  return `<details class="image-toggle"><summary class="image-toggle-summary">${summaryText}</summary>${imgHtml}</details>`
+}
+
+/**
+ * 仅在引用块中折叠图片，避免正文图片被强制折叠。
+ *
+ * @param html 原始楼层 HTML 字符串
+ * @return 处理后的 HTML 字符串
+ */
+const wrapQuotedImages = (html: string): string => {
+  if (html === '') {
+    return html
+  }
+  return html.replace(/<blockquote\b[^>]*>[\s\S]*?<\/blockquote>/gi, (block) => {
+    return block.replace(/<img\b[^>]*>/gi, (imgTag) => buildImageToggleHtml(imgTag))
+  })
+}
+
+/**
+ * 标准化楼层 HTML 内容，补齐图片地址并兼容基础 UBB 标签。
+ *
+ * @param html 原始楼层 HTML 字符串
+ * @return 处理后的 HTML 字符串
+ */
+const normalizePostHtml = (html: string) => {
+  let output = html
+  output = normalizeQuoteTags(output)
+  output = normalizeSimpleUbbTags(output)
+  output = normalizeUbbMetaTags(output)
+  output = output.replace(/\[img\]([\s\S]*?)\[\/img\]/gi, (_, rawSrc: string) => {
+    const normalized = normalizeImageSrc(rawSrc)
+    const safeSrc = normalized.replace(/"/g, '&quot;')
+    return `<img src="${safeSrc}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+  })
+  output = output.replace(
+    /<img\b([^>]*?)\bsrc=(['"])([^'"]+)\2([^>]*)>/gi,
+    (match, before, quote, src, after) => {
+      const normalized = normalizeImageSrc(src)
+      if (normalized === src) {
+        return match
+      }
+      const safeSrc = normalized.replace(/"/g, '&quot;')
+      // 业务规则：仅当图片地址需要补齐时才重写标签，避免丢失原标签的额外属性
+      return `<img${before}src=${quote}${safeSrc}${quote}${after}>`
+    }
+  )
+  output = wrapQuotedImages(output)
+  return output
+}
+
+/**
  * 解析分页参数，保证页码合法。
+ *
+ * @param value 路由中可能出现的页码值
+ * @return 合法的页码数字
  */
 const parsePage = (value: unknown): number => {
   const rawValue = Array.isArray(value) ? value[0] : value
@@ -95,6 +215,10 @@ const threadId = computed(() => {
 
 /**
  * 获取主题详情数据。
+ *
+ * @param id 主题 ID
+ * @return Promise<void>
+ * 副作用：更新主题详情状态与错误提示。
  */
 const loadThread = async (id: number) => {
   loadingThread.value = true
@@ -112,6 +236,11 @@ const loadThread = async (id: number) => {
 
 /**
  * 获取楼层列表，并重置历史版本状态。
+ *
+ * @param id 主题 ID
+ * @param page 页码
+ * @return Promise<void>
+ * 副作用：更新楼层列表、分页信息与错误提示。
  */
 const loadPosts = async (id: number, page: number) => {
   loadingPosts.value = true
@@ -135,6 +264,10 @@ const loadPosts = async (id: number, page: number) => {
 
 /**
  * 获取或初始化楼层历史版本状态。
+ *
+ * @param postId 楼层 ID
+ * @return 楼层历史版本状态
+ * 副作用：必要时会写入本地状态缓存。
  */
 const getRevisionState = (postId: number): RevisionState => {
   const existing = revisionStates.value[postId]
@@ -158,6 +291,11 @@ const getRevisionState = (postId: number): RevisionState => {
 
 /**
  * 加载楼层历史版本列表（按时间倒序）。
+ *
+ * @param postId 楼层 ID
+ * @param page 页码
+ * @return Promise<void>
+ * 副作用：更新历史版本状态与错误提示。
  */
 const loadPostRevisions = async (postId: number, page: number) => {
   const state = getRevisionState(postId)
@@ -180,6 +318,10 @@ const loadPostRevisions = async (postId: number, page: number) => {
 
 /**
  * 切换历史版本面板显示状态。
+ *
+ * @param postId 楼层 ID
+ * @return Promise<void>
+ * 副作用：更新历史版本开关，并可能触发首次加载。
  */
 const togglePostRevisions = async (postId: number) => {
   const state = getRevisionState(postId)
@@ -193,6 +335,9 @@ const togglePostRevisions = async (postId: number) => {
 
 /**
  * 判断是否还能加载更多历史版本。
+ *
+ * @param state 历史版本状态
+ * @return 是否还能加载更多
  */
 const canLoadMoreRevisions = (state: RevisionState): boolean => {
   if (!state.meta) {
@@ -203,8 +348,12 @@ const canLoadMoreRevisions = (state: RevisionState): boolean => {
 
 /**
  * 将变更原因 token 转换为中文说明。
+ *
+ * @param reason 后端返回的变更原因串
+ * @return 中文可读说明
  */
 const formatChangeReason = (reason: string): string => {
+  // 业务含义：变更原因 token 与中文说明的映射关系
   const mapping: Record<string, string> = {
     content_fingerprint_changed: '内容变化',
     marked_deleted_by_source: '标记删除',
@@ -219,6 +368,10 @@ const formatChangeReason = (reason: string): string => {
 
 /**
  * 跳转至指定页码。
+ *
+ * @param page 页码
+ * @return void
+ * 副作用：更新路由参数并触发数据刷新。
  */
 const goToPage = (page: number) => {
   router.push({
