@@ -16,6 +16,7 @@ services:
       context: ./docker/php
       args:
         TZ: "${TZ:-Asia/Shanghai}"
+    image: elegant_nga-php
     depends_on:
       - mysql
     environment:
@@ -24,10 +25,7 @@ services:
       - ./backend:/var/www/backend
 
   scheduler:
-    build:
-      context: ./docker/php
-      args:
-        TZ: "${TZ:-Asia/Shanghai}"
+    image: elegant_nga-php
     depends_on:
       - mysql
     restart: unless-stopped
