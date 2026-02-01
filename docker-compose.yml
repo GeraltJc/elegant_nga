@@ -23,6 +23,20 @@ services:
     volumes:
       - ./backend:/var/www/backend
 
+  scheduler:
+    build:
+      context: ./docker/php
+      args:
+        TZ: "${TZ:-Asia/Shanghai}"
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ./backend:/var/www/backend
+    command: ["php", "artisan", "schedule:work"]
+
   frontend:
     build:
       context: ./docker/frontend

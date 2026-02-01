@@ -4,6 +4,7 @@ namespace App\Services\Nga;
 
 use App\Services\Nga\Exceptions\NgaRequestException;
 use App\Services\Nga\CrawlErrorSummary;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
@@ -53,7 +54,42 @@ class HttpNgaLiteClient implements NgaLiteClient
     /**
      * 规则：访客初始化请求日志落盘路径。
      */
-    private const GUEST_INIT_LOG_PATH = 'logs/nga-guest-init.log';
+    private const GUEST_INIT_LOG_DEFAULT_PATH = 'logs/nga-guest-init.log';
+
+    /**
+     * 规则：curl 日志默认文件名。
+     */
+    private const CURL_LOG_DEFAULT_FILENAME = 'nga-curl.log';
+
+    /**
+     * 规则：访客初始化日志默认文件名。
+     */
+    private const GUEST_INIT_LOG_DEFAULT_FILENAME = 'nga-guest-init.log';
+
+    /**
+     * 规则：按天切分日志的日期格式。
+     */
+    private const LOG_DATE_FORMAT = 'Y-m-d';
+
+    /**
+     * 规则：curl 日志保留天数默认值。
+     */
+    private const DEFAULT_CURL_LOG_RETENTION_DAYS = 3;
+
+    /**
+     * 规则：访客初始化日志保留天数默认值。
+     */
+    private const DEFAULT_GUEST_INIT_LOG_RETENTION_DAYS = 3;
+
+    /**
+     * 规则：同一进程内 curl 日志每日只清理一次，避免高频 I/O。
+     */
+    private static ?string $lastCurlLogCleanupDate = null;
+
+    /**
+     * 规则：同一进程内访客初始化日志每日只清理一次，避免高频 I/O。
+     */
+    private static ?string $lastGuestInitLogCleanupDate = null;
 
     private ?string $guestJs = null;
     private ?string $lastVisit = null;
@@ -823,8 +859,10 @@ class HttpNgaLiteClient implements NgaLiteClient
             $logLine = '{"error":"encode_failed"}';
         }
 
-        $logPath = storage_path(self::GUEST_INIT_LOG_PATH);
-        @file_put_contents($logPath, $logLine.PHP_EOL, FILE_APPEND);
+        $logPath = $this->resolveGuestInitLogPath();
+        if ($logPath !== null) {
+            @file_put_contents($logPath, $logLine.PHP_EOL, FILE_APPEND);
+        }
     }
 
     /**
@@ -1192,12 +1230,207 @@ class HttpNgaLiteClient implements NgaLiteClient
      */
     private function resolveCurlLogPath(): ?string
     {
-        $path = (string) env('NGA_CURL_LOG_PATH', storage_path('logs/nga-curl.log'));
-        if ($path === '') {
-            // 空字符串表示禁用 curl 日志落盘
+        $rawPath = (string) env('NGA_CURL_LOG_PATH', storage_path('logs/'.self::CURL_LOG_DEFAULT_FILENAME));
+        // 业务含义：空字符串表示禁用 curl 日志落盘。
+        $isDisabled = $rawPath === '';
+        if ($isDisabled) {
             return null;
         }
 
-        return $path;
+        $dateString = CarbonImmutable::now('Asia/Shanghai')->format(self::LOG_DATE_FORMAT);
+        $dailyLog = $this->resolveDailyLogPathAndPattern($rawPath, self::CURL_LOG_DEFAULT_FILENAME, $dateString);
+
+        $retentionDays = $this->resolveLogRetentionDays('NGA_CURL_LOG_DAYS', self::DEFAULT_CURL_LOG_RETENTION_DAYS);
+        $this->cleanupDailyLogsIfNeeded(
+            $dailyLog['pattern'],
+            $retentionDays,
+            'Asia/Shanghai',
+            self::$lastCurlLogCleanupDate
+        );
+
+        return $dailyLog['path'];
+    }
+
+    /**
+     * 解析访客初始化日志落盘路径（按天切分）。
+     *
+     * @return string|null
+     * 副作用：可能触发过期日志清理。
+     */
+    private function resolveGuestInitLogPath(): ?string
+    {
+        $rawPath = storage_path(self::GUEST_INIT_LOG_DEFAULT_PATH);
+        $dateString = CarbonImmutable::now('Asia/Shanghai')->format(self::LOG_DATE_FORMAT);
+        $dailyLog = $this->resolveDailyLogPathAndPattern($rawPath, self::GUEST_INIT_LOG_DEFAULT_FILENAME, $dateString);
+
+        $retentionDays = $this->resolveLogRetentionDays(
+            'NGA_GUEST_INIT_LOG_DAYS',
+            self::DEFAULT_GUEST_INIT_LOG_RETENTION_DAYS
+        );
+        $this->cleanupDailyLogsIfNeeded(
+            $dailyLog['pattern'],
+            $retentionDays,
+            'Asia/Shanghai',
+            self::$lastGuestInitLogCleanupDate
+        );
+
+        return $dailyLog['path'];
+    }
+
+    /**
+     * 解析按天切分日志路径与匹配模式。
+     *
+     * @param string $rawPath 原始路径（可包含 {date}）
+     * @param string $defaultFileName 默认文件名
+     * @param string $dateString 日期字符串（YYYY-MM-DD）
+     * @return array{path:string, pattern:string} 路径与清理匹配模式
+     * 无副作用。
+     */
+    private function resolveDailyLogPathAndPattern(string $rawPath, string $defaultFileName, string $dateString): array
+    {
+        $basePath = $this->normalizeLogBasePath($rawPath, $defaultFileName);
+        // 业务含义：显式 {date} 优先，便于自定义命名规则。
+        $hasDatePlaceholder = str_contains($basePath, '{date}');
+
+        if ($hasDatePlaceholder) {
+            return [
+                'path' => str_replace('{date}', $dateString, $basePath),
+                'pattern' => str_replace('{date}', '*', $basePath),
+            ];
+        }
+
+        $extension = pathinfo($basePath, PATHINFO_EXTENSION);
+        $hasExtension = $extension !== '';
+        if ($hasExtension) {
+            $suffix = '.'.$extension;
+            $pathWithoutSuffix = substr($basePath, 0, -strlen($suffix));
+            return [
+                'path' => $pathWithoutSuffix.'-'.$dateString.$suffix,
+                'pattern' => $pathWithoutSuffix.'-*'.$suffix,
+            ];
+        }
+
+        return [
+            'path' => $basePath.'-'.$dateString,
+            'pattern' => $basePath.'-*',
+        ];
+    }
+
+    /**
+     * 规范化日志路径，兼容传入目录的场景。
+     *
+     * @param string $rawPath 原始路径
+     * @param string $defaultFileName 默认文件名
+     * @return string 规范化后的文件路径
+     * 无副作用。
+     */
+    private function normalizeLogBasePath(string $rawPath, string $defaultFileName): string
+    {
+        $trimmedPath = rtrim($rawPath);
+        $endsWithSlash = str_ends_with($trimmedPath, '/') || str_ends_with($trimmedPath, DIRECTORY_SEPARATOR);
+        $isDirectory = is_dir($trimmedPath);
+        // 业务含义：路径指向目录时，自动补全默认文件名。
+        $shouldTreatAsDirectory = $endsWithSlash || $isDirectory;
+
+        if ($shouldTreatAsDirectory) {
+            $normalizedDirectory = rtrim($trimmedPath, '/\\');
+            return $normalizedDirectory.DIRECTORY_SEPARATOR.$defaultFileName;
+        }
+
+        return $trimmedPath;
+    }
+
+    /**
+     * 解析日志保留天数。
+     *
+     * @param string $envKey 环境变量键名
+     * @param int $defaultDays 默认保留天数
+     * @return int 保留天数（0 表示不自动清理）
+     * 无副作用。
+     */
+    private function resolveLogRetentionDays(string $envKey, int $defaultDays): int
+    {
+        $rawValue = env($envKey);
+        $hasValue = $rawValue !== null && $rawValue !== '';
+        if (!$hasValue) {
+            return $defaultDays;
+        }
+
+        $days = (int) $rawValue;
+        // 业务含义：负数视为配置错误，回退到默认值。
+        if ($days < 0) {
+            return $defaultDays;
+        }
+
+        return $days;
+    }
+
+    /**
+     * 清理过期的按天日志文件。
+     *
+     * @param string $pattern 日志文件匹配模式
+     * @param int $retentionDays 保留天数（0 表示不清理）
+     * @param string $timezone 时区
+     * @param string|null $lastCleanupDateRef 上次清理日期（引用更新）
+     * @return void
+     * 副作用：可能删除历史日志文件。
+     */
+    private function cleanupDailyLogsIfNeeded(
+        string $pattern,
+        int $retentionDays,
+        string $timezone,
+        ?string &$lastCleanupDateRef
+    ): void {
+        // 业务含义：配置为 0 表示保留所有日志，不做清理。
+        $shouldSkipCleanup = $retentionDays === 0;
+        if ($shouldSkipCleanup) {
+            return;
+        }
+
+        $today = CarbonImmutable::now($timezone)->format(self::LOG_DATE_FORMAT);
+        $alreadyCleaned = $lastCleanupDateRef === $today;
+        if ($alreadyCleaned) {
+            return;
+        }
+        $lastCleanupDateRef = $today;
+
+        $keepFromDate = CarbonImmutable::now($timezone)->startOfDay()->subDays(max(0, $retentionDays - 1));
+        $files = glob($pattern) ?: [];
+
+        foreach ($files as $file) {
+            $fileDate = $this->extractLogDateFromFilename($file, $timezone);
+            if ($fileDate === null) {
+                continue;
+            }
+
+            $shouldDelete = $fileDate->lt($keepFromDate);
+            if ($shouldDelete) {
+                @unlink($file);
+            }
+        }
+    }
+
+    /**
+     * 从日志文件名中提取日期。
+     *
+     * @param string $path 文件路径
+     * @param string $timezone 时区
+     * @return CarbonImmutable|null 解析成功的日期
+     * 无副作用。
+     */
+    private function extractLogDateFromFilename(string $path, string $timezone): ?CarbonImmutable
+    {
+        $fileName = basename($path);
+        $matched = preg_match('/\\d{4}-\\d{2}-\\d{2}/', $fileName, $matches);
+        if ($matched !== 1) {
+            return null;
+        }
+
+        $parsed = CarbonImmutable::createFromFormat(self::LOG_DATE_FORMAT, $matches[0], $timezone);
+        if (!$parsed instanceof CarbonImmutable) {
+            return null;
+        }
+
+        return $parsed->startOfDay();
     }
 }

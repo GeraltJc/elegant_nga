@@ -35,6 +35,27 @@ docker compose exec php php artisan nga:audit-missing-floors --thread-ids=461015
 php backend/artisan nga:crawl-lite --fid=7 --recent-days=3
 ```
 
+### 0.5) 定时任务（Scheduler）
+
+本项目使用 Laravel Scheduler，并通过 Docker Compose 的 `scheduler` 服务常驻运行：
+
+```bash
+docker compose up -d scheduler
+```
+
+调度内容（Asia/Shanghai）：
+
+- 每天 `03:00 / 10:00 / 15:00` 触发一次抓取与审计流程
+- 具体命令为包装命令：`nga:crawl-lite-and-audit`
+  - 先执行 `nga:crawl-lite --fid=7 --recent-days=3`
+  - 抓取成功后等待 5 分钟，再执行 `nga:audit-missing-floors --repair`
+  - 全流程互斥，避免不同时间点并发
+
+调度日志：
+
+- 日志文件：`backend/storage/logs/scheduler-YYYY-MM-DD.log`
+- 保留天数：`LOG_SCHEDULER_DAYS`（默认 14 天）
+
 ### 1) 列表排序规则（order_by=postdatedesc）
 
 - 列表抓取请求会强制带 `order_by=postdatedesc`，保证列表按“主题创建时间（postdate）倒序”返回。

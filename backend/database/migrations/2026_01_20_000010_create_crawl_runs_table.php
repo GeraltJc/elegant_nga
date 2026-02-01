@@ -13,7 +13,7 @@ return new class extends Migration
             $table->foreignId('forum_id')->constrained('forums')->cascadeOnDelete()->comment('所属版块（forums.id）');
             $table->dateTime('run_started_at')->comment('本次运行开始时间');
             $table->dateTime('run_finished_at')->nullable()->comment('本次运行结束时间');
-            $table->string('run_trigger_text', 30)->comment('触发来源（schedule_12h/manual）');
+            $table->string('run_trigger_text', 30)->comment('触发来源（scheduler/manual/floor_audit）');
             $table->date('date_window_start')->nullable()->comment('自然日窗口起（上海时区）');
             $table->date('date_window_end')->nullable()->comment('自然日窗口止（上海时区）');
             $table->unsignedInteger('thread_scanned_count')->default(0)->comment('扫描主题数（窗口过滤后）');
@@ -24,7 +24,7 @@ return new class extends Migration
             $table->dateTime('updated_at')->nullable()->comment('更新时间');
 
             $table->index(['forum_id', 'run_started_at']);
-            $table->comment('抓取运行记录（每次 12 小时任务/手动任务的汇总审计）');
+            $table->comment('抓取运行记录（每次定时/手动任务的汇总审计）');
         });
     }
 

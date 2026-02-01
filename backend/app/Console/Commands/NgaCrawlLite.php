@@ -31,6 +31,7 @@ class NgaCrawlLite extends Command
         {--recent-days=3 : 抓取最近天数}
         {--start-at= : 时间窗口开始（示例：2026-01-23 17:48:00）}
         {--end-at= : 时间窗口结束（示例：2026-01-23 17:50:00）}
+        {--trigger-text=manual : 触发来源标识}
         {--fixtures= : fixture 目录路径}';
 
     /**
@@ -57,6 +58,7 @@ class NgaCrawlLite extends Command
         $recentDays = $recentDaysOption === null ? null : (int) $recentDaysOption;
         $startAt = (string) $this->option('start-at');
         $endAt = (string) $this->option('end-at');
+        $triggerText = (string) $this->option('trigger-text');
         $windowStart = null;
         $windowEnd = null;
 
@@ -106,7 +108,7 @@ class NgaCrawlLite extends Command
 
         $contentProcessor = NgaPostContentProcessor::makeDefault();
         $crawler = new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
-        $result = $crawler->crawlForum($fid, $maxPostPages, $recentDays, $listPage, $windowStart, $windowEnd);
+        $result = $crawler->crawlForum($fid, $maxPostPages, $recentDays, $listPage, $windowStart, $windowEnd, $triggerText);
 
         $runId = $result['run_id'] ?? 'n/a';
         $runWindowStart = $result['date_window_start'] ?? 'n/a';

@@ -18,7 +18,7 @@ return new class extends Migration
             $table->id();
             $table->dateTime('run_started_at')->comment('审计开始时间');
             $table->dateTime('run_finished_at')->nullable()->comment('审计结束时间');
-            $table->string('run_trigger_text', 30)->comment('触发来源（manual/cron等）');
+            $table->string('run_trigger_text', 30)->comment('触发来源（scheduler/manual等）');
             $table->boolean('repair_enabled')->default(false)->comment('是否包含修补步骤');
             $table->unsignedInteger('total_thread_count')->default(0)->comment('扫描主题数');
             $table->unsignedInteger('missing_thread_count')->default(0)->comment('缺楼层主题数');

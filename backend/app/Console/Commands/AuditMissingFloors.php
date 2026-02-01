@@ -27,6 +27,7 @@ class AuditMissingFloors extends Command
         {--max-post-pages=5 : 修补时单次抓取最大页数}
         {--limit= : 限制审计主题数量}
         {--thread-ids= : 指定 tid 列表（逗号分隔）}
+        {--trigger-text=manual : 触发来源标识}
         {--source=http : 数据来源（http/fixture）}
         {--fixtures= : fixture 目录路径}';
 
@@ -50,6 +51,7 @@ class AuditMissingFloors extends Command
         $limit = $limitOption === null ? null : (int) $limitOption;
         $threadIdsOption = trim((string) $this->option('thread-ids'));
         $sourceThreadIds = $this->parseSourceThreadIds($threadIdsOption);
+        $triggerText = (string) $this->option('trigger-text');
 
         if ($limit !== null && $limit <= 0) {
             $this->error('limit 必须为正整数或留空');
@@ -78,7 +80,7 @@ class AuditMissingFloors extends Command
         $crawler = new NgaLiteCrawler($client, $listParser, $threadParser, $contentProcessor);
         $service = new ThreadFloorAuditService($crawler);
 
-        $run = $service->run($repairEnabled, $maxPostPages, $limit, 'manual', $sourceThreadIds);
+        $run = $service->run($repairEnabled, $maxPostPages, $limit, $triggerText, $sourceThreadIds);
 
         $this->info("Audit Run ID: {$run->id}");
         $this->info('Repair enabled: '.($run->repair_enabled ? 'yes' : 'no'));
