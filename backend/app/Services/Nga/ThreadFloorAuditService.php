@@ -2,6 +2,7 @@
 
 namespace App\Services\Nga;
 
+use App\Models\CrawlRun;
 use App\Models\CrawlRunThread;
 use App\Models\Post;
 use App\Models\Thread;
@@ -9,6 +10,7 @@ use App\Models\ThreadFloorAuditRun;
 use App\Models\ThreadFloorAuditThread;
 use App\Models\ThreadFloorAuditPost;
 use App\Models\ThreadFloorRepairAttempt;
+use App\Services\Nga\CrawlRunRecorder;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -149,6 +151,7 @@ class ThreadFloorAuditService
         $failedParseCount = 0;
         $failedDbCount = 0;
         $failedUnknownCount = 0;
+        $repairRunRecorder = null;
 
         foreach ($missingThreads as $candidate) {
             $missingFloors = $this->resolveMissingFloors(
@@ -199,11 +202,18 @@ class ThreadFloorAuditService
                 continue;
             }
 
+            if ($repairRunRecorder === null) {
+                // 业务：floor audit 需要汇总为同一个抓取运行，避免每个线程都落一条 Run。
+                $repairRunRecorder = new CrawlRunRecorder();
+            }
+
             $repairResult = $this->repairAuditThread(
                 $auditThread,
                 $filtered['pending'],
                 $filtered['attempt_counts'],
-                $maxPostPages
+                $maxPostPages,
+                $repairRunRecorder,
+                false
             );
             if ($repairResult['status'] === self::STATUS_REPAIRED) {
                 $repairedThreadCount++;
@@ -222,6 +232,11 @@ class ThreadFloorAuditService
                     $failedUnknownCount++;
                 }
             }
+        }
+
+        if ($repairRunRecorder !== null && $repairRunRecorder->getRun() instanceof CrawlRun) {
+            // 业务：整个 floor audit 流程完成后再统一 finish，保持报表中只有一条 Run。
+            $repairRunRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
         }
 
         $run->fill([
@@ -337,6 +352,8 @@ class ThreadFloorAuditService
      * @param array<int, int> $pendingFloors 需要尝试修补的缺口楼层号
      * @param array<int, int> $attemptCounts 缺口楼层尝试次数映射
      * @param int $maxPostPages 修补时单次抓取最大页数
+     * @param CrawlRunRecorder|null $sharedRunRecorder 共享的抓取运行记录器
+     * @param bool $finishCrawlRunAutomatically 是否由本次调用自动 finish Run
      * @return array{status:string, error_category:string|null} 修补结果
      * 副作用：触发抓取并更新审计明细。
      */
@@ -344,7 +361,9 @@ class ThreadFloorAuditService
         ThreadFloorAuditThread $auditThread,
         array $pendingFloors,
         array $attemptCounts,
-        int $maxPostPages
+        int $maxPostPages,
+        ?CrawlRunRecorder $sharedRunRecorder = null,
+        bool $finishCrawlRunAutomatically = true
     ): array
     {
         $auditThread->fill([
@@ -377,7 +396,9 @@ class ThreadFloorAuditService
             (int) $auditThread->source_thread_id,
             $pagesToFetch,
             (int) $auditThread->max_floor_number,
-            'floor_audit'
+            'floor_audit',
+            $sharedRunRecorder,
+            $finishCrawlRunAutomatically
         );
 
         $repairRunId = $result['run_id'] ?? null;

@@ -2,6 +2,7 @@
 
 namespace App\Services\Nga;
 
+use App\Models\CrawlRun;
 use App\Models\Forum;
 use App\Models\Post;
 use App\Models\PostRevision;
@@ -66,6 +67,8 @@ class NgaLiteCrawler
      * @param CarbonImmutable|null $windowStart 窗口起（可选，默认 recentDays 计算）
      * @param CarbonImmutable|null $windowEnd 窗口止（可选，默认 recentDays 计算）
      * @param string $runTriggerText 运行触发来源
+     * @param CrawlRunRecorder|null $runRecorder 外部运行记录器（null 则内部创建）
+     * @param bool $finishRunAutomatically 是否在本次调用结束时自动 finish Run
      * @return array{
      *     threads:int,
      *     posts:int,
@@ -516,7 +519,9 @@ class NgaLiteCrawler
         int $tid,
         array $pages,
         int $capMaxFloorNumber,
-        string $runTriggerText = 'floor_audit'
+        string $runTriggerText = 'floor_audit',
+        ?CrawlRunRecorder $runRecorder = null,
+        bool $finishRunAutomatically = true
     ): array {
         $now = CarbonImmutable::now('Asia/Shanghai');
         $thread = Thread::firstOrNew([
@@ -537,14 +542,20 @@ class NgaLiteCrawler
             $forum = Forum::query()->find($forumId);
         }
 
-        $runRecorder = new CrawlRunRecorder();
-        $run = $runRecorder->startRun(
-            $forum?->id ?? $this->getOrCreateForumId(),
-            $runTriggerText,
-            null,
-            null,
-            $now
-        );
+        $runRecorder = $runRecorder ?? new CrawlRunRecorder();
+        $runStartedHere = false;
+        if (!$runRecorder->getRun() instanceof CrawlRun) {
+            $run = $runRecorder->startRun(
+                $forum?->id ?? $this->getOrCreateForumId(),
+                $runTriggerText,
+                null,
+                null,
+                $now
+            );
+            $runStartedHere = true;
+        } else {
+            $run = $runRecorder->getRun();
+        }
         if ($forum instanceof Forum) {
             $this->configureHttpClientIfSupported($forum, $runRecorder);
         }
@@ -567,6 +578,7 @@ class NgaLiteCrawler
             $normalizedPages = [1];
         }
 
+        $failedThreadCountForThisCall = 0;
         try {
             $processResult = $this->crawlThreadSpecifiedPages(
                 $thread,
@@ -598,14 +610,20 @@ class NgaLiteCrawler
                 $failure['http_error_code'],
                 $failure['summary']
             );
+            $failedThreadCountForThisCall = 1;
         } finally {
-            $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
+            if ($finishRunAutomatically && $runStartedHere) {
+                $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
+            }
         }
+
+        $summary = $runRecorder->getSummary();
 
         return [
             'thread' => $threadCount,
             'posts' => $postCount,
-            ...$runRecorder->getSummary(),
+            ...$summary,
+            'failed_thread_count' => $failedThreadCountForThisCall,
         ];
     }
 

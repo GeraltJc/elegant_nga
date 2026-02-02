@@ -89,6 +89,17 @@ class CrawlRunRecorder
     }
 
     /**
+     * 获取当前运行记录，用于复用或延迟关闭。
+     *
+     * @return CrawlRun|null 当前会话的 run 模型
+     * 无副作用。
+     */
+    public function getRun(): ?CrawlRun
+    {
+        return $this->run;
+    }
+
+    /**
      * 获取运行汇总统计，供命令输出使用。
      *
      * @return array{
