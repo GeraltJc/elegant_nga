@@ -32,6 +32,7 @@ class CrawlRunRecorder
      * @param CarbonImmutable|null $windowStart 统计窗口起
      * @param CarbonImmutable|null $windowEnd 统计窗口止
      * @param CarbonImmutable $startedAt 运行开始时间
+     * @param int|null $auditRunId 关联审计运行 ID（thread_floor_audit_runs.id，可空）
      * @return CrawlRun 运行记录模型
      * 副作用：写入 crawl_runs。
      */
@@ -40,7 +41,8 @@ class CrawlRunRecorder
         string $triggerText,
         ?CarbonImmutable $windowStart,
         ?CarbonImmutable $windowEnd,
-        CarbonImmutable $startedAt
+        CarbonImmutable $startedAt,
+        ?int $auditRunId = null
     ): CrawlRun {
         $this->runStartedAt = $startedAt;
 
@@ -48,6 +50,7 @@ class CrawlRunRecorder
             'forum_id' => $forumId,
             'run_started_at' => $startedAt,
             'run_trigger_text' => $triggerText,
+            'audit_run_id' => $auditRunId,
             'date_window_start' => $windowStart?->toDateString(),
             'date_window_end' => $windowEnd?->toDateString(),
             'thread_scanned_count' => 0,
@@ -271,6 +274,7 @@ class CrawlRunRecorder
             'page_limit_applied' => false,
             'new_post_count' => 0,
             'updated_post_count' => 0,
+            'http_request_count' => 0,
             'http_error_code' => null,
             'error_summary' => null,
             'started_at' => $startedAt,
@@ -287,6 +291,7 @@ class CrawlRunRecorder
      * @param bool $pageLimitApplied 是否触发页上限
      * @param int $newPostCount 新增楼层数
      * @param int $updatedPostCount 更新楼层数
+     * @param int $httpRequestCount 该主题处理期间的 HTTP 请求次数（含重试）
      * @return void
      * 副作用：更新 crawl_run_threads。
      */
@@ -296,13 +301,15 @@ class CrawlRunRecorder
         int $fetchedPageCount,
         bool $pageLimitApplied,
         int $newPostCount,
-        int $updatedPostCount
+        int $updatedPostCount,
+        int $httpRequestCount = 0
     ): void {
         $runThread->fill([
             'fetched_page_count' => $fetchedPageCount,
             'page_limit_applied' => $pageLimitApplied,
             'new_post_count' => $newPostCount,
             'updated_post_count' => $updatedPostCount,
+            'http_request_count' => $httpRequestCount,
             'http_error_code' => null,
             'error_summary' => null,
             'finished_at' => $finishedAt,
@@ -317,6 +324,7 @@ class CrawlRunRecorder
      * @param CarbonImmutable $finishedAt 处理结束时间
      * @param int|null $httpErrorCode HTTP 状态码
      * @param string $errorSummary 错误摘要
+     * @param int $httpRequestCount 该主题处理期间的 HTTP 请求次数（含重试）
      * @return void
      * 副作用：更新 crawl_run_threads。
      */
@@ -324,11 +332,13 @@ class CrawlRunRecorder
         CrawlRunThread $runThread,
         CarbonImmutable $finishedAt,
         ?int $httpErrorCode,
-        string $errorSummary
+        string $errorSummary,
+        int $httpRequestCount = 0
     ): void {
         $runThread->fill([
             'http_error_code' => $httpErrorCode,
             'error_summary' => $errorSummary,
+            'http_request_count' => $httpRequestCount,
             'finished_at' => $finishedAt,
         ]);
         $runThread->save();

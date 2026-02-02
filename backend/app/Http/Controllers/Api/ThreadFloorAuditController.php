@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\CrawlRun;
 use App\Models\ThreadFloorAuditPost;
 use App\Models\ThreadFloorAuditRun;
 use App\Models\ThreadFloorAuditThread;
@@ -258,8 +259,14 @@ class ThreadFloorAuditController extends Controller
             $durationMs = $run->run_finished_at->diffInMilliseconds($run->run_started_at, true);
         }
 
+        $crawlRunId = CrawlRun::query()
+            ->where('audit_run_id', $run->id)
+            ->orderBy('id')
+            ->value('id');
+
         $data = $this->formatRunSummary($run);
         $data['duration_ms'] = $durationMs;
+        $data['crawl_run_id'] = $crawlRunId === null ? null : (int) $crawlRunId;
 
         return $data;
     }

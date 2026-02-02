@@ -183,6 +183,7 @@ php backend/artisan nga:crawl-lite --fid=7 --recent-days=0 --list-page=1
 
 - 每次运行会写入一条 crawl_runs 汇总（时间窗口、耗时、请求数、成功/失败等）。
 - 每个主题处理会写入 crawl_run_threads 明细（成功/失败、抓取页数、是否触发页上限、错误摘要等）。
+- 缺楼层修补会落一条 crawl_runs，并通过 audit_run_id 关联对应的 thread_floor_audit_runs。
 
 你可以通过前端页面验证抓取效果：
 

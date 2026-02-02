@@ -2,6 +2,7 @@
 
 namespace App\Services\Nga;
 
+use App\Models\CrawlRun;
 use App\Models\Forum;
 use App\Models\Post;
 use App\Models\PostRevision;
@@ -39,6 +40,14 @@ class NgaLiteCrawler
      * 规则：来源标记为折叠。
      */
     private const CHANGE_REASON_FOLDED = 'marked_folded_by_source';
+
+    /**
+     * 当前主题处理期间的 HTTP 请求计数器。
+     *
+     * 业务含义：用于把“主题级请求次数”落表到 crawl_run_threads，方便排查“哪个主题消耗了多少请求”。
+     * 风险点：该计数器依赖“串行处理主题”的执行模型；并发抓取时需要改为上下文隔离。
+     */
+    private ?int $activeThreadHttpRequestCount = null;
 
     /**
      * 初始化抓取器依赖组件。
@@ -201,6 +210,8 @@ class NgaLiteCrawler
                             CarbonImmutable::now('Asia/Shanghai')
                         );
 
+                        $this->beginThreadHttpRequestTracking();
+
                         if ($shouldSkipThreadDetail) {
                             // 业务规则：创建时间超过窗口的主题不抓取回复详情
                             $runRecorder->markThreadSuccess(
@@ -209,7 +220,8 @@ class NgaLiteCrawler
                                 0,
                                 false,
                                 0,
-                                0
+                                0,
+                                $this->endThreadHttpRequestTracking()
                             );
                             continue;
                         }
@@ -227,7 +239,8 @@ class NgaLiteCrawler
                                 0,
                                 false,
                                 0,
-                                0
+                                0,
+                                $this->endThreadHttpRequestTracking()
                             );
                             continue;
                         }
@@ -239,7 +252,8 @@ class NgaLiteCrawler
                                 0,
                                 false,
                                 0,
-                                0
+                                0,
+                                $this->endThreadHttpRequestTracking()
                             );
                             continue;
                         }
@@ -273,7 +287,8 @@ class NgaLiteCrawler
                                 $threadResult['fetched_pages'],
                                 $threadResult['page_limit_applied'],
                                 $threadResult['new_posts'],
-                                $threadResult['updated_posts']
+                                $threadResult['updated_posts'],
+                                $this->endThreadHttpRequestTracking()
                             );
                         } else {
                             $runRecorder->increaseFailedThreadCount();
@@ -281,7 +296,8 @@ class NgaLiteCrawler
                                 $runThread,
                                 CarbonImmutable::now('Asia/Shanghai'),
                                 $threadAttemptResult['http_error_code'],
-                                $threadAttemptResult['error_summary']
+                                $threadAttemptResult['error_summary'],
+                                $this->endThreadHttpRequestTracking()
                             );
                         }
                     } catch (Throwable $exception) {
@@ -293,7 +309,8 @@ class NgaLiteCrawler
                                 $runThread,
                                 CarbonImmutable::now('Asia/Shanghai'),
                                 $failure['http_error_code'],
-                                $failure['summary']
+                                $failure['summary'],
+                                $this->endThreadHttpRequestTracking()
                             );
                         }
 
@@ -422,6 +439,8 @@ class NgaLiteCrawler
             CarbonImmutable::now('Asia/Shanghai')
         );
 
+        $this->beginThreadHttpRequestTracking();
+
         $threadCount = 0;
         $postCount = 0;
 
@@ -433,7 +452,8 @@ class NgaLiteCrawler
                     0,
                     false,
                     0,
-                    0
+                    0,
+                    $this->endThreadHttpRequestTracking()
                 );
             } else {
                 $threadAttemptResult = $this->crawlThreadWithRetry(
@@ -459,7 +479,8 @@ class NgaLiteCrawler
                         $threadResult['fetched_pages'],
                         $threadResult['page_limit_applied'],
                         $threadResult['new_posts'],
-                        $threadResult['updated_posts']
+                        $threadResult['updated_posts'],
+                        $this->endThreadHttpRequestTracking()
                     );
                 } else {
                     $runRecorder->increaseFailedThreadCount();
@@ -467,7 +488,8 @@ class NgaLiteCrawler
                         $runThread,
                         CarbonImmutable::now('Asia/Shanghai'),
                         $threadAttemptResult['http_error_code'],
-                        $threadAttemptResult['error_summary']
+                        $threadAttemptResult['error_summary'],
+                        $this->endThreadHttpRequestTracking()
                     );
                 }
             }
@@ -558,6 +580,8 @@ class NgaLiteCrawler
             CarbonImmutable::now('Asia/Shanghai')
         );
 
+        $this->beginThreadHttpRequestTracking();
+
         $threadCount = 0;
         $postCount = 0;
 
@@ -587,7 +611,8 @@ class NgaLiteCrawler
                 $processResult['fetched_pages'],
                 false,
                 $processResult['new_posts'],
-                $processResult['updated_posts']
+                $processResult['updated_posts'],
+                $this->endThreadHttpRequestTracking()
             );
         } catch (Throwable $exception) {
             $runRecorder->increaseFailedThreadCount();
@@ -596,7 +621,8 @@ class NgaLiteCrawler
                 $runThread,
                 CarbonImmutable::now('Asia/Shanghai'),
                 $failure['http_error_code'],
-                $failure['summary']
+                $failure['summary'],
+                $this->endThreadHttpRequestTracking()
             );
         } finally {
             $runRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
@@ -606,6 +632,110 @@ class NgaLiteCrawler
             'thread' => $threadCount,
             'posts' => $postCount,
             ...$runRecorder->getSummary(),
+        ];
+    }
+
+    /**
+     * 在外部传入的运行记录下执行单主题缺楼层修补（不创建/结束 crawl_runs）。
+     *
+     * 业务含义：用于“缺楼层审计”的批次修补场景，把多个主题的修补归并到同一条 crawl_runs，
+     * 从而在运行报表中展示为“一次运行 + 多条主题明细”，并支持统计总请求数等指标。
+     *
+     * @param CrawlRunRecorder $runRecorder 运行记录器（外部负责 finishRun）
+     * @param CrawlRun $run 所属运行记录
+     * @param int $tid 主题 tid
+     * @param array<int, int> $pages 需要抓取的页码集合（1基）
+     * @param int $capMaxFloorNumber 修补上限最大楼层号（0基）
+     * @param CarbonImmutable $now 修补执行时刻（上海时区）
+     * @return array{thread:int, posts:int, failed:bool} 修补执行结果摘要
+     * 副作用：写入 posts 以及 crawl_run_threads。
+     */
+    public function repairThreadMissingFloorsByPagesInRun(
+        CrawlRunRecorder $runRecorder,
+        CrawlRun $run,
+        int $tid,
+        array $pages,
+        int $capMaxFloorNumber,
+        CarbonImmutable $now
+    ): array {
+        $forum = Forum::query()->find($run->forum_id);
+        if ($forum instanceof Forum) {
+            $this->configureHttpClientIfSupported($forum, $runRecorder);
+        }
+
+        $thread = Thread::firstOrNew([
+            'source_thread_id' => $tid,
+        ]);
+
+        if (!$thread->exists) {
+            $thread->forum_id = $run->forum_id;
+            $thread->thread_created_at = $now;
+            $thread->author_name = 'unknown';
+            $thread->title = (string) $tid;
+            $thread->save();
+        }
+
+        $runRecorder->increaseThreadScannedCount();
+        $runThread = $runRecorder->startThread(
+            $run,
+            $thread,
+            false,
+            null,
+            CarbonImmutable::now('Asia/Shanghai')
+        );
+
+        $this->beginThreadHttpRequestTracking();
+
+        $threadCount = 0;
+        $postCount = 0;
+        $failed = false;
+
+        $normalizedPages = array_values(array_unique(array_filter(array_map('intval', $pages), fn (int $p): bool => $p > 0)));
+        sort($normalizedPages);
+        if ($normalizedPages === []) {
+            $normalizedPages = [1];
+        }
+
+        try {
+            $processResult = $this->crawlThreadSpecifiedPages(
+                $thread,
+                $normalizedPages,
+                max(0, $capMaxFloorNumber),
+                $now,
+                $runThread->id
+            );
+
+            $threadCount = 1;
+            $postCount = $processResult['posts'];
+            $runRecorder->increaseThreadUpdatedCount();
+            $runRecorder->increaseNewPostCount($processResult['new_posts']);
+            $runRecorder->increaseUpdatedPostCount($processResult['updated_posts']);
+            $runRecorder->markThreadSuccess(
+                $runThread,
+                CarbonImmutable::now('Asia/Shanghai'),
+                $processResult['fetched_pages'],
+                false,
+                $processResult['new_posts'],
+                $processResult['updated_posts'],
+                $this->endThreadHttpRequestTracking()
+            );
+        } catch (Throwable $exception) {
+            $failed = true;
+            $runRecorder->increaseFailedThreadCount();
+            $failure = $this->resolveThreadFailure($exception);
+            $runRecorder->markThreadFailure(
+                $runThread,
+                CarbonImmutable::now('Asia/Shanghai'),
+                $failure['http_error_code'],
+                $failure['summary'],
+                $this->endThreadHttpRequestTracking()
+            );
+        }
+
+        return [
+            'thread' => $threadCount,
+            'posts' => $postCount,
+            'failed' => $failed,
         ];
     }
 
@@ -1109,7 +1239,37 @@ class NgaLiteCrawler
 
         $this->client->setRequestAttemptObserver(function () use ($runRecorder): void {
             $runRecorder->increaseHttpRequestCount();
+            if ($this->activeThreadHttpRequestCount !== null) {
+                $this->activeThreadHttpRequestCount++;
+            }
         });
+    }
+
+    /**
+     * 开始统计“主题级 HTTP 请求次数”。
+     *
+     * 业务含义：把一个主题处理期间的请求量落到 crawl_run_threads，便于成本与异常排查。
+     *
+     * @return void
+     * 副作用：重置内部计数器。
+     */
+    private function beginThreadHttpRequestTracking(): void
+    {
+        $this->activeThreadHttpRequestCount = 0;
+    }
+
+    /**
+     * 结束统计“主题级 HTTP 请求次数”并返回计数值。
+     *
+     * @return int 请求次数
+     * 副作用：清空内部计数器。
+     */
+    private function endThreadHttpRequestTracking(): int
+    {
+        $count = $this->activeThreadHttpRequestCount ?? 0;
+        $this->activeThreadHttpRequestCount = null;
+
+        return $count;
     }
 
     /**

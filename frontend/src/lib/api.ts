@@ -83,6 +83,7 @@ export type CrawlRunThread = {
   page_limit_applied: boolean
   new_post_count: number
   updated_post_count: number
+  http_request_count: number
   http_error_code: number | null
   error_summary: string | null
   started_at: string | null
@@ -108,6 +109,7 @@ export type FloorAuditRunSummary = {
 
 export type FloorAuditRunDetail = FloorAuditRunSummary & {
   duration_ms: number | null
+  crawl_run_id: number | null
 }
 
 export type FloorAuditThread = {
@@ -219,7 +221,13 @@ export const fetchCrawlRun = (
  */
 export const fetchCrawlRunThreads = (
   runId: number,
-  params?: { page?: number; per_page?: number; only_failed?: 0 | 1 }
+  params?: {
+    page?: number
+    per_page?: number
+    only_failed?: 0 | 1
+    thread_id?: number
+    source_thread_id?: number
+  }
 ): Promise<ApiListResponse<CrawlRunThread>> =>
   requestJson(`/api/crawl-runs/${runId}/threads`, params)
 

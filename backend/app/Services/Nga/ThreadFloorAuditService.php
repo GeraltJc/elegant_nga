@@ -3,6 +3,7 @@
 namespace App\Services\Nga;
 
 use App\Models\CrawlRunThread;
+use App\Models\Forum;
 use App\Models\Post;
 use App\Models\Thread;
 use App\Models\ThreadFloorAuditRun;
@@ -18,6 +19,26 @@ use Illuminate\Support\Facades\DB;
  */
 class ThreadFloorAuditService
 {
+    /**
+     * 规则：默认版面 fid。
+     *
+     * 业务含义：缺楼层修补需落 crawl_runs，若无法从 threads 推断版面，则回退到 fid=7。
+     */
+    private const DEFAULT_FORUM_SOURCE_ID = 7;
+
+    /**
+     * 规则：默认版面抓取页上限。
+     *
+     * 业务含义：保持与轻量抓取器默认值一致，避免审计修补写入异常配置。
+     */
+    private const DEFAULT_FORUM_CRAWL_PAGE_LIMIT = 5;
+
+    /**
+     * 规则：默认版面请求限速（每秒）。
+     *
+     * 业务含义：与现有抓取默认配置一致，避免修补时产生意外压力。
+     */
+    private const DEFAULT_FORUM_RATE_LIMIT_PER_SEC = 1.00;
     /**
      * 规则：缺口页码估算的默认每页楼层数。
      *
@@ -140,6 +161,23 @@ class ThreadFloorAuditService
             'failed_unknown_count' => 0,
         ]);
 
+        $repairRunRecorder = null;
+        $repairCrawlRun = null;
+        if ($repairEnabled) {
+            $forumId = $this->resolveRepairForumId();
+
+            // 业务含义：审计修补的抓取过程也需要可追溯，统一落一条 crawl_runs，明细写入 crawl_run_threads。
+            $repairRunRecorder = new CrawlRunRecorder();
+            $repairCrawlRun = $repairRunRecorder->startRun(
+                $forumId,
+                'floor_audit',
+                null,
+                null,
+                $now,
+                (int) $run->id
+            );
+        }
+
         $missingThreads = $this->findMissingCandidates($limit, $sourceThreadIds);
         $missingThreadCount = 0;
         $repairedThreadCount = 0;
@@ -150,77 +188,85 @@ class ThreadFloorAuditService
         $failedDbCount = 0;
         $failedUnknownCount = 0;
 
-        foreach ($missingThreads as $candidate) {
-            $missingFloors = $this->resolveMissingFloors(
-                (int) $candidate->thread_id,
-                (int) $candidate->max_floor_number
-            );
+        try {
+            foreach ($missingThreads as $candidate) {
+                $missingFloors = $this->resolveMissingFloors(
+                    (int) $candidate->thread_id,
+                    (int) $candidate->max_floor_number
+                );
 
-            if ($missingFloors === []) {
-                continue;
-            }
-
-            $missingThreadCount++;
-
-            $filtered = $this->splitMissingFloorsByAttemptLimit(
-                (int) $candidate->thread_id,
-                $missingFloors,
-                self::MAX_REPAIR_ATTEMPTS_PER_FLOOR
-            );
-
-            $auditThread = ThreadFloorAuditThread::create([
-                'audit_run_id' => $run->id,
-                'thread_id' => (int) $candidate->thread_id,
-                'source_thread_id' => (int) $candidate->source_thread_id,
-                'max_floor_number' => (int) $candidate->max_floor_number,
-                'post_count' => (int) $candidate->post_count,
-                'missing_floor_count' => count($missingFloors),
-                'ignored_floor_count' => count($filtered['ignored']),
-                'repair_status' => self::STATUS_MISSING,
-            ]);
-
-            $this->createAuditPosts(
-                $run->id,
-                $auditThread,
-                $missingFloors,
-                $filtered
-            );
-
-            if (!$repairEnabled) {
-                continue;
-            }
-
-            if ($filtered['pending'] === []) {
-                $auditThread->fill([
-                    'repair_status' => self::STATUS_SKIPPED,
-                    'repair_finished_at' => CarbonImmutable::now('Asia/Shanghai'),
-                ]);
-                $auditThread->save();
-                continue;
-            }
-
-            $repairResult = $this->repairAuditThread(
-                $auditThread,
-                $filtered['pending'],
-                $filtered['attempt_counts'],
-                $maxPostPages
-            );
-            if ($repairResult['status'] === self::STATUS_REPAIRED) {
-                $repairedThreadCount++;
-            } elseif ($repairResult['status'] === self::STATUS_PARTIAL) {
-                $partialThreadCount++;
-            } elseif ($repairResult['status'] === self::STATUS_FAILED) {
-                $failedThreadCount++;
-                $category = $repairResult['error_category'] ?? self::ERROR_CATEGORY_UNKNOWN;
-                if ($category === self::ERROR_CATEGORY_HTTP) {
-                    $failedHttpCount++;
-                } elseif ($category === self::ERROR_CATEGORY_PARSE) {
-                    $failedParseCount++;
-                } elseif ($category === self::ERROR_CATEGORY_DB) {
-                    $failedDbCount++;
-                } else {
-                    $failedUnknownCount++;
+                if ($missingFloors === []) {
+                    continue;
                 }
+
+                $missingThreadCount++;
+
+                $filtered = $this->splitMissingFloorsByAttemptLimit(
+                    (int) $candidate->thread_id,
+                    $missingFloors,
+                    self::MAX_REPAIR_ATTEMPTS_PER_FLOOR
+                );
+
+                $auditThread = ThreadFloorAuditThread::create([
+                    'audit_run_id' => $run->id,
+                    'thread_id' => (int) $candidate->thread_id,
+                    'source_thread_id' => (int) $candidate->source_thread_id,
+                    'max_floor_number' => (int) $candidate->max_floor_number,
+                    'post_count' => (int) $candidate->post_count,
+                    'missing_floor_count' => count($missingFloors),
+                    'ignored_floor_count' => count($filtered['ignored']),
+                    'repair_status' => self::STATUS_MISSING,
+                ]);
+
+                $this->createAuditPosts(
+                    $run->id,
+                    $auditThread,
+                    $missingFloors,
+                    $filtered
+                );
+
+                if (!$repairEnabled) {
+                    continue;
+                }
+
+                if ($filtered['pending'] === []) {
+                    $auditThread->fill([
+                        'repair_status' => self::STATUS_SKIPPED,
+                        'repair_finished_at' => CarbonImmutable::now('Asia/Shanghai'),
+                    ]);
+                    $auditThread->save();
+                    continue;
+                }
+
+                $repairResult = $this->repairAuditThread(
+                    $auditThread,
+                    $filtered['pending'],
+                    $filtered['attempt_counts'],
+                    $maxPostPages,
+                    $repairRunRecorder,
+                    $repairCrawlRun
+                );
+                if ($repairResult['status'] === self::STATUS_REPAIRED) {
+                    $repairedThreadCount++;
+                } elseif ($repairResult['status'] === self::STATUS_PARTIAL) {
+                    $partialThreadCount++;
+                } elseif ($repairResult['status'] === self::STATUS_FAILED) {
+                    $failedThreadCount++;
+                    $category = $repairResult['error_category'] ?? self::ERROR_CATEGORY_UNKNOWN;
+                    if ($category === self::ERROR_CATEGORY_HTTP) {
+                        $failedHttpCount++;
+                    } elseif ($category === self::ERROR_CATEGORY_PARSE) {
+                        $failedParseCount++;
+                    } elseif ($category === self::ERROR_CATEGORY_DB) {
+                        $failedDbCount++;
+                    } else {
+                        $failedUnknownCount++;
+                    }
+                }
+            }
+        } finally {
+            if ($repairRunRecorder instanceof CrawlRunRecorder) {
+                $repairRunRecorder->finishRun(CarbonImmutable::now('Asia/Shanghai'));
             }
         }
 
@@ -238,6 +284,48 @@ class ThreadFloorAuditService
         $run->save();
 
         return $run;
+    }
+
+    /**
+     * 解析缺楼层修补使用的版面 ID。
+     *
+     * 业务含义：优先沿用 threads 的 forum_id；若缺失或无效，则回退创建 fid=7 的论坛记录。
+     *
+     * @return int forums.id
+     * 副作用：必要时写入 forums。
+     */
+    private function resolveRepairForumId(): int
+    {
+        $forumId = Thread::query()->orderBy('id')->value('forum_id');
+        if ($forumId !== null && Forum::query()->whereKey($forumId)->exists()) {
+            return (int) $forumId;
+        }
+
+        $forum = Forum::firstOrCreate(
+            ['source_forum_id' => self::DEFAULT_FORUM_SOURCE_ID],
+            [
+                'forum_name' => null,
+                'list_url' => $this->buildDefaultForumListUrl(self::DEFAULT_FORUM_SOURCE_ID),
+                'crawl_page_limit' => self::DEFAULT_FORUM_CRAWL_PAGE_LIMIT,
+                'request_rate_limit_per_sec' => self::DEFAULT_FORUM_RATE_LIMIT_PER_SEC,
+            ]
+        );
+
+        return (int) $forum->id;
+    }
+
+    /**
+     * 构造默认版面列表 URL。
+     *
+     * 业务含义：保持与轻量抓取器默认规则一致。
+     *
+     * @param int $fid 版面 fid
+     * @return string 列表 URL
+     * 无副作用。
+     */
+    private function buildDefaultForumListUrl(int $fid): string
+    {
+        return "https://nga.178.com/thread.php?fid={$fid}&order_by=postdatedesc";
     }
 
     /**
@@ -337,6 +425,8 @@ class ThreadFloorAuditService
      * @param array<int, int> $pendingFloors 需要尝试修补的缺口楼层号
      * @param array<int, int> $attemptCounts 缺口楼层尝试次数映射
      * @param int $maxPostPages 修补时单次抓取最大页数
+     * @param CrawlRunRecorder|null $repairRunRecorder 统一修补抓取的运行记录器（可空）
+     * @param \App\Models\CrawlRun|null $repairCrawlRun 统一修补抓取的运行记录（可空）
      * @return array{status:string, error_category:string|null} 修补结果
      * 副作用：触发抓取并更新审计明细。
      */
@@ -344,7 +434,9 @@ class ThreadFloorAuditService
         ThreadFloorAuditThread $auditThread,
         array $pendingFloors,
         array $attemptCounts,
-        int $maxPostPages
+        int $maxPostPages,
+        ?CrawlRunRecorder $repairRunRecorder = null,
+        ?\App\Models\CrawlRun $repairCrawlRun = null
     ): array
     {
         $auditThread->fill([
@@ -373,17 +465,32 @@ class ThreadFloorAuditService
             self::DEFAULT_PAGE_SIZE_ESTIMATE
         );
 
-        $result = $this->crawler->repairThreadMissingFloorsByPages(
-            (int) $auditThread->source_thread_id,
-            $pagesToFetch,
-            (int) $auditThread->max_floor_number,
-            'floor_audit'
-        );
+        $repairRunId = $repairCrawlRun?->id;
+        if ($repairRunRecorder instanceof CrawlRunRecorder && $repairCrawlRun instanceof \App\Models\CrawlRun) {
+            $result = $this->crawler->repairThreadMissingFloorsByPagesInRun(
+                $repairRunRecorder,
+                $repairCrawlRun,
+                (int) $auditThread->source_thread_id,
+                $pagesToFetch,
+                (int) $auditThread->max_floor_number,
+                CarbonImmutable::now('Asia/Shanghai')
+            );
+            $repairRunId = $repairCrawlRun->id;
+        } else {
+            $result = $this->crawler->repairThreadMissingFloorsByPages(
+                (int) $auditThread->source_thread_id,
+                $pagesToFetch,
+                (int) $auditThread->max_floor_number,
+                'floor_audit'
+            );
+            $repairRunId = $result['run_id'] ?? null;
+        }
 
-        $repairRunId = $result['run_id'] ?? null;
         $auditThread->repair_crawl_run_id = $repairRunId === null ? null : (int) $repairRunId;
 
-        if (($result['failed_thread_count'] ?? 0) > 0) {
+        $hasRepairFailed = (bool) ($result['failed'] ?? false) || ((int) ($result['failed_thread_count'] ?? 0) > 0);
+
+        if ($hasRepairFailed) {
             $errorContext = $this->resolveRepairErrorContext($repairRunId, (int) $auditThread->thread_id);
             $afterSnapshot = $this->buildRepairAfterSnapshot((int) $auditThread->thread_id);
             $auditThread->fill([

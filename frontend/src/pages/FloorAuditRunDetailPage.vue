@@ -139,7 +139,9 @@ const formatDuration = (durationMs: number | null | undefined): string => {
   if (durationMs === null || durationMs === undefined) {
     return '-'
   }
-  return `${durationMs} ms`
+  const seconds = durationMs / 1000
+  const formatted = Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
+  return `${formatted} s`
 }
 
 /**
@@ -217,6 +219,13 @@ watch(
         <span>结束：{{ formatDateTime(run.run_finished_at) }}</span>
         <span>耗时：{{ formatDuration(run.duration_ms) }}</span>
         <span>修补：{{ run.repair_enabled ? '包含修补' : '仅审计' }}</span>
+        <RouterLink
+          v-if="run.crawl_run_id"
+          class="link"
+          :to="`/crawl-runs/${run.crawl_run_id}`"
+        >
+          查看抓取运行
+        </RouterLink>
       </div>
     </section>
 

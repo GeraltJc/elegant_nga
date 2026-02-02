@@ -124,11 +124,15 @@ class CrawlRunController extends Controller
             'page' => ['sometimes', 'integer', 'min:1'],
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
             'only_failed' => ['sometimes', 'boolean'],
+            'thread_id' => ['sometimes', 'integer', 'min:1'],
+            'source_thread_id' => ['sometimes', 'integer', 'min:1'],
         ]);
 
         $page = (int) ($validated['page'] ?? 1);
         $perPage = (int) ($validated['per_page'] ?? 20);
         $onlyFailed = $this->normalizeBoolean($validated['only_failed'] ?? null);
+        $threadId = isset($validated['thread_id']) ? (int) $validated['thread_id'] : null;
+        $sourceThreadId = isset($validated['source_thread_id']) ? (int) $validated['source_thread_id'] : null;
 
         $run = CrawlRun::query()->whereKey($crawlRunId)->first();
         if (!$run) {
@@ -144,6 +148,16 @@ class CrawlRunController extends Controller
             $query->whereNotNull('error_summary');
         }
 
+        if ($threadId !== null) {
+            $query->where('thread_id', $threadId);
+        }
+
+        if ($sourceThreadId !== null) {
+            $query->whereHas('thread', function ($threadQuery) use ($sourceThreadId): void {
+                $threadQuery->where('source_thread_id', $sourceThreadId);
+            });
+        }
+
         $paginator = $query->paginate($perPage, page: $page);
 
         $data = array_map(function (CrawlRunThread $runThread): array {
@@ -157,6 +171,7 @@ class CrawlRunController extends Controller
                 'page_limit_applied' => (bool) $runThread->page_limit_applied,
                 'new_post_count' => (int) $runThread->new_post_count,
                 'updated_post_count' => (int) $runThread->updated_post_count,
+                'http_request_count' => (int) ($runThread->http_request_count ?? 0),
                 'http_error_code' => $runThread->http_error_code === null ? null : (int) $runThread->http_error_code,
                 'error_summary' => $runThread->error_summary,
                 'started_at' => $runThread->started_at?->setTimezone('Asia/Shanghai')->format('Y-m-d H:i:s'),

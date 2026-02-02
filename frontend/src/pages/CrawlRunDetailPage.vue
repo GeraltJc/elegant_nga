@@ -24,6 +24,8 @@ const threadsError = ref('')
 
 const currentPage = ref(1)
 const onlyFailed = ref(false)
+const filterThreadIdText = ref('')
+const filterSourceThreadIdText = ref('')
 const perPage = 20
 
 /**
@@ -48,6 +50,18 @@ const parsePage = (value: unknown): number => {
 }
 
 /**
+ * 解析正整数参数，无法解析时返回 null。
+ */
+const parsePositiveInt = (value: unknown): number | null => {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  const parsed = Number.parseInt(typeof rawValue === 'string' ? rawValue : '', 10)
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return null
+  }
+  return parsed
+}
+
+/**
  * 解析失败过滤参数，统一转换为布尔值。
  */
 const parseOnlyFailed = (value: unknown): boolean => {
@@ -64,9 +78,16 @@ const parseOnlyFailed = (value: unknown): boolean => {
 /**
  * 从路由同步当前页码与过滤状态。
  */
-const syncFromRoute = (): { page: number; onlyFailed: boolean } => ({
+const syncFromRoute = (): {
+  page: number
+  onlyFailed: boolean
+  threadId: number | null
+  sourceThreadId: number | null
+} => ({
   page: parsePage(route.query.page),
   onlyFailed: parseOnlyFailed(route.query.only_failed),
+  threadId: parsePositiveInt(route.query.thread_id),
+  sourceThreadId: parsePositiveInt(route.query.source_thread_id),
 })
 
 /**
@@ -93,11 +114,15 @@ const loadThreads = async (id: number, page: number, failedOnly: boolean) => {
   loadingThreads.value = true
   threadsError.value = ''
   try {
+    const threadId = parsePositiveInt(filterThreadIdText.value)
+    const sourceThreadId = parsePositiveInt(filterSourceThreadIdText.value)
     const response = await fetchCrawlRunThreads(id, {
       page,
       per_page: perPage,
       // 规则：后端仅接受 1/0，避免传 true/false 触发校验失败
       only_failed: failedOnly ? 1 : undefined,
+      thread_id: threadId ?? undefined,
+      source_thread_id: sourceThreadId ?? undefined,
     })
     threads.value = response.data
     meta.value = response.meta
@@ -115,6 +140,22 @@ const loadThreads = async (id: number, page: number, failedOnly: boolean) => {
  */
 const toggleOnlyFailed = () => {
   updateRoute({ page: 1, onlyFailed: !onlyFailed.value })
+}
+
+/**
+ * 应用主题过滤条件并同步路由。
+ */
+const applyThreadFilters = () => {
+  updateRoute({ page: 1 })
+}
+
+/**
+ * 清空主题过滤条件并同步路由。
+ */
+const clearThreadFilters = () => {
+  filterThreadIdText.value = ''
+  filterSourceThreadIdText.value = ''
+  updateRoute({ page: 1 })
 }
 
 /**
@@ -140,6 +181,14 @@ const updateRoute = (updates: { page?: number; onlyFailed?: boolean }) => {
   if (failedOnly) {
     nextQuery.only_failed = '1'
   }
+  const threadId = parsePositiveInt(filterThreadIdText.value)
+  const sourceThreadId = parsePositiveInt(filterSourceThreadIdText.value)
+  if (threadId !== null) {
+    nextQuery.thread_id = String(threadId)
+  }
+  if (sourceThreadId !== null) {
+    nextQuery.source_thread_id = String(sourceThreadId)
+  }
   router.push({ path: `/crawl-runs/${runId.value}`, query: nextQuery })
 }
 
@@ -150,7 +199,9 @@ const formatDuration = (durationMs: number | null | undefined): string => {
   if (durationMs === null || durationMs === undefined) {
     return '-'
   }
-  return `${durationMs} ms`
+  const seconds = durationMs / 1000
+  const formatted = Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
+  return `${formatted} s`
 }
 
 /**
@@ -166,7 +217,13 @@ const resolveThreadLink = (thread: CrawlRunThread): string | null =>
   thread.source_thread_id ? `/threads/${thread.source_thread_id}` : null
 
 watch(
-  [() => route.params.runId, () => route.query.page, () => route.query.only_failed],
+  [
+    () => route.params.runId,
+    () => route.query.page,
+    () => route.query.only_failed,
+    () => route.query.thread_id,
+    () => route.query.source_thread_id,
+  ],
   () => {
     const id = runId.value
     if (!id) {
@@ -176,9 +233,11 @@ watch(
       meta.value = null
       return
     }
-    const { page, onlyFailed: failedOnly } = syncFromRoute()
+    const { page, onlyFailed: failedOnly, threadId, sourceThreadId } = syncFromRoute()
     currentPage.value = page
     onlyFailed.value = failedOnly
+    filterThreadIdText.value = threadId === null ? '' : String(threadId)
+    filterSourceThreadIdText.value = sourceThreadId === null ? '' : String(sourceThreadId)
     loadRun(id)
     loadThreads(id, page, failedOnly)
   },
@@ -258,6 +317,31 @@ watch(
         </button>
       </div>
 
+      <section class="search-bar">
+        <input
+          v-model.trim="filterThreadIdText"
+          class="input"
+          placeholder="按 thread_id 筛选"
+          inputmode="numeric"
+          @keyup.enter="applyThreadFilters"
+        />
+        <input
+          v-model.trim="filterSourceThreadIdText"
+          class="input"
+          placeholder="按 source_thread_id 筛选"
+          inputmode="numeric"
+          @keyup.enter="applyThreadFilters"
+        />
+        <button class="button primary" @click="applyThreadFilters">筛选</button>
+        <button
+          v-if="filterThreadIdText || filterSourceThreadIdText"
+          class="button"
+          @click="clearThreadFilters"
+        >
+          清空
+        </button>
+      </section>
+
       <section v-if="loadingThreads" class="state">加载中...</section>
       <section v-else-if="threadsError" class="state error">
         {{ threadsError }}
@@ -291,6 +375,7 @@ watch(
           <div class="report-stats">
             <span>新增 {{ thread.new_post_count }}</span>
             <span>更新 {{ thread.updated_post_count }}</span>
+            <span>HTTP 请求 {{ thread.http_request_count }}</span>
             <span>HTTP {{ thread.http_error_code ?? '-' }}</span>
           </div>
           <div class="report-meta">
