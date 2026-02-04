@@ -54,6 +54,9 @@ class NgaLiteListParser
             $title = $this->stringValue($thread, ['title', 'subject']);
             $titlePrefix = $this->extractTitlePrefix($title);
 
+            // 业务含义：列表缺失回复数时保持 null，避免误写为 0。
+            $replyCountDisplay = $this->intValue($thread, ['reply_count', 'replies', 'reply_count_display'], null);
+
             $results[] = [
                 'source_thread_id' => $this->intValue($thread, ['tid', 'thread_id', 'id']),
                 'title' => $title,
@@ -62,7 +65,7 @@ class NgaLiteListParser
                 'author_source_user_id' => $this->intValue($thread, ['author_id', 'author_uid', 'author_source_user_id', 'authorid'], null),
                 'thread_created_at' => $this->dateValue($thread, ['post_time', 'thread_created_at', 'created_at', 'post_at', 'postdate']),
                 'last_reply_at' => $this->dateValue($thread, ['last_reply', 'last_reply_at', 'reply_at', 'lastpost'], true),
-                'reply_count_display' => $this->intValue($thread, ['reply_count', 'replies', 'reply_count_display'], 0),
+                'reply_count_display' => $replyCountDisplay,
                 'view_count_display' => $this->intValue($thread, ['view_count', 'views', 'view_count_display', 'hits'], null),
                 'is_pinned' => $this->boolValue($thread, ['is_pinned', 'pinned', 'top'], false),
                 'is_digest' => $this->boolValue($thread, ['is_digest', 'digest'], false),
@@ -129,7 +132,8 @@ class NgaLiteListParser
             }
 
             if ($replyCount === null) {
-                $replyCount = $this->extractReplyCount($xpath, $row) ?? 0;
+                // 业务含义：列表无法解析回复数时保持 null，避免误写为 0。
+                $replyCount = $this->extractReplyCount($xpath, $row);
             }
 
             $type = $meta['type'] ?? null;

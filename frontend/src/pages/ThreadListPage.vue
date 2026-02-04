@@ -15,6 +15,8 @@ const errorMessage = ref('')
 const searchInput = ref('')
 const currentSort = ref<'created_at' | 'last_reply_at'>('created_at')
 const currentPage = ref(1)
+const replyMinInput = ref('')
+const replyMaxInput = ref('')
 const perPage = 30
 
 const parsePage = (value: unknown): number => {
@@ -26,27 +28,47 @@ const parsePage = (value: unknown): number => {
   return parsed
 }
 
+const parseNonNegativeInt = (value: unknown): number | null => {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return null
+  }
+  const parsed = Number.parseInt(String(rawValue), 10)
+  if (Number.isNaN(parsed) || parsed < 0) {
+    return null
+  }
+  return parsed
+}
+
 const syncFromRoute = (): {
   sort: 'created_at' | 'last_reply_at'
   keyword: string
   page: number
+  replyMin: number | null
+  replyMax: number | null
 } => {
   const sort =
     route.query.sort === 'last_reply_at' ? 'last_reply_at' : 'created_at'
   const keyword = typeof route.query.q === 'string' ? route.query.q : ''
   const page = parsePage(route.query.page)
-  return { sort, keyword, page }
+  const replyMin = parseNonNegativeInt(route.query.reply_min)
+  const replyMax = parseNonNegativeInt(route.query.reply_max)
+  return { sort, keyword, page, replyMin, replyMax }
 }
 
 const loadThreads = async () => {
   loading.value = true
   errorMessage.value = ''
   try {
+    const replyMin = parseNonNegativeInt(replyMinInput.value)
+    const replyMax = parseNonNegativeInt(replyMaxInput.value)
     const response = await fetchThreads({
       page: currentPage.value,
       per_page: perPage,
       sort: currentSort.value,
       q: searchInput.value.trim() || undefined,
+      reply_min: replyMin ?? undefined,
+      reply_max: replyMax ?? undefined,
     })
     threads.value = response.data
     meta.value = response.meta
@@ -63,11 +85,15 @@ const updateRoute = (updates: {
   page?: number
   sort?: 'created_at' | 'last_reply_at'
   keyword?: string
+  replyMin?: string
+  replyMax?: string
 }) => {
   const nextQuery: Record<string, string> = {}
   const nextSort = updates.sort ?? currentSort.value
   const nextPage = updates.page ?? currentPage.value
   const nextQueryValue = updates.keyword ?? searchInput.value
+  const nextReplyMin = updates.replyMin ?? replyMinInput.value
+  const nextReplyMax = updates.replyMax ?? replyMaxInput.value
 
   if (nextSort) {
     nextQuery.sort = nextSort
@@ -78,17 +104,39 @@ const updateRoute = (updates: {
   if (nextQueryValue.trim() !== '') {
     nextQuery.q = nextQueryValue.trim()
   }
+  const replyMinValue = parseNonNegativeInt(nextReplyMin)
+  if (replyMinValue !== null) {
+    nextQuery.reply_min = String(replyMinValue)
+  }
+  const replyMaxValue = parseNonNegativeInt(nextReplyMax)
+  if (replyMaxValue !== null) {
+    nextQuery.reply_max = String(replyMaxValue)
+  }
 
   router.push({ path: '/', query: nextQuery })
 }
 
 const submitSearch = () => {
-  updateRoute({ page: 1, keyword: searchInput.value })
+  const replyMin = parseNonNegativeInt(replyMinInput.value)
+  const replyMax = parseNonNegativeInt(replyMaxInput.value)
+  if (replyMin !== null && replyMax !== null && replyMax < replyMin) {
+    errorMessage.value = '回复数区间不合法'
+    return
+  }
+
+  updateRoute({
+    page: 1,
+    keyword: searchInput.value,
+    replyMin: replyMinInput.value,
+    replyMax: replyMaxInput.value,
+  })
 }
 
 const clearSearch = () => {
   searchInput.value = ''
-  updateRoute({ page: 1, keyword: '' })
+  replyMinInput.value = ''
+  replyMaxInput.value = ''
+  updateRoute({ page: 1, keyword: '', replyMin: '', replyMax: '' })
 }
 
 const changeSort = (sort: 'created_at' | 'last_reply_at') => {
@@ -105,10 +153,12 @@ const goToPage = (page: number) => {
 watch(
   () => route.query,
   () => {
-    const { sort, keyword, page } = syncFromRoute()
+    const { sort, keyword, page, replyMin, replyMax } = syncFromRoute()
     currentSort.value = sort
     searchInput.value = keyword
     currentPage.value = page
+    replyMinInput.value = replyMin === null ? '' : String(replyMin)
+    replyMaxInput.value = replyMax === null ? '' : String(replyMax)
     loadThreads()
   },
   { immediate: true }
@@ -147,8 +197,32 @@ watch(
       placeholder="搜索标题或 1 楼正文"
       @keyup.enter="submitSearch"
     />
+    <input
+      v-model="replyMinInput"
+      class="input"
+      type="number"
+      min="0"
+      placeholder="回复数下限（有效回复数）"
+      title="按有效回复数过滤（只增不减）"
+      @keyup.enter="submitSearch"
+    />
+    <input
+      v-model="replyMaxInput"
+      class="input"
+      type="number"
+      min="0"
+      placeholder="回复数上限（有效回复数）"
+      title="按有效回复数过滤（只增不减）"
+      @keyup.enter="submitSearch"
+    />
     <button class="button primary" @click="submitSearch">搜索</button>
-    <button v-if="searchInput" class="button" @click="clearSearch">清空</button>
+    <button
+      v-if="searchInput || replyMinInput || replyMaxInput"
+      class="button"
+      @click="clearSearch"
+    >
+      清空
+    </button>
   </section>
 
   <section v-if="loading" class="state">加载中...</section>

@@ -29,12 +29,16 @@ class ThreadController extends Controller
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
             'sort' => ['sometimes', Rule::in(['created_at', 'last_reply_at'])],
             'q' => ['sometimes', 'string', 'max:200'],
+            'reply_min' => ['sometimes', 'integer', 'min:0'],
+            'reply_max' => ['sometimes', 'integer', 'min:0', 'gte:reply_min'],
         ]);
 
         $page = (int) ($validated['page'] ?? 1);
         $perPage = (int) ($validated['per_page'] ?? 30);
         $sort = (string) ($validated['sort'] ?? 'created_at');
         $keyword = trim((string) ($validated['q'] ?? ''));
+        $replyMin = array_key_exists('reply_min', $validated) ? (int) $validated['reply_min'] : null;
+        $replyMax = array_key_exists('reply_max', $validated) ? (int) $validated['reply_max'] : null;
 
         $query = Thread::query()
             ->select([
@@ -67,6 +71,14 @@ class ThreadController extends Controller
                             ->where('posts.content_html', 'like', $like);
                     });
             });
+        }
+
+        if ($replyMin !== null) {
+            $query->where('reply_count_display', '>=', $replyMin);
+        }
+
+        if ($replyMax !== null) {
+            $query->where('reply_count_display', '<=', $replyMax);
         }
 
         $query->orderByDesc('is_pinned');

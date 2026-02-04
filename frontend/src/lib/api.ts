@@ -184,6 +184,8 @@ export const fetchThreads = (params?: {
   per_page?: number
   sort?: 'created_at' | 'last_reply_at'
   q?: string
+  reply_min?: number
+  reply_max?: number
 }): Promise<ApiListResponse<ThreadSummary>> => requestJson('/api/threads', params)
 
 export const fetchThread = (threadId: number): Promise<ApiItemResponse<ThreadDetail>> =>

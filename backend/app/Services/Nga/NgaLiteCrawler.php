@@ -185,6 +185,12 @@ class NgaLiteCrawler
                             $runRecorder->increaseThreadChangeDetectedCount();
                         }
 
+                        // 业务规则：回复数只增不减，避免列表缺失值把已有数据覆盖为 0。
+                        $replyCountDisplay = $this->resolveEffectiveReplyCountDisplay(
+                            (int) $thread->reply_count_display,
+                            $threadData['reply_count_display'] ?? null
+                        );
+
                         $thread->fill([
                             'title' => $threadData['title'],
                             'title_prefix_text' => $threadData['title_prefix_text'],
@@ -192,7 +198,7 @@ class NgaLiteCrawler
                             'author_source_user_id' => $threadData['author_source_user_id'],
                             'thread_created_at' => $createdAt,
                             'last_reply_at' => $lastReplyAt,
-                            'reply_count_display' => $threadData['reply_count_display'],
+                            'reply_count_display' => $replyCountDisplay,
                             'view_count_display' => $threadData['view_count_display'],
                             'is_pinned' => $threadData['is_pinned'],
                             'is_digest' => $threadData['is_digest'],
@@ -954,8 +960,11 @@ class NgaLiteCrawler
                     $thread->skipped_by_page_total_limit_at = $now;
                 }
                 if ($replyCountTotalFromDetail !== null) {
-                    // 业务规则：详情页提供的回复数更可信，用于纠正列表页 reply_count_display
-                    $thread->reply_count_display = $replyCountTotalFromDetail;
+                    // 业务规则：详情页提供的回复数更可信，但仍需保持“只增不减”。
+                    $thread->reply_count_display = $this->resolveEffectiveReplyCountDisplay(
+                        (int) $thread->reply_count_display,
+                        $replyCountTotalFromDetail
+                    );
                 }
                 $thread->crawl_backfill_next_page_number = null;
                 $thread->is_truncated_by_page_limit = true;
@@ -1075,6 +1084,12 @@ class NgaLiteCrawler
             $resolvedReplyCountDisplay = max(0, (int) $maxFloor);
         }
 
+        // 业务规则：回复数只增不减，避免详情抓取被后续列表覆盖回退。
+        $nextReplyCountDisplay = $this->resolveEffectiveReplyCountDisplay(
+            (int) $thread->reply_count_display,
+            $resolvedReplyCountDisplay
+        );
+
         $thread->fill([
             'last_crawled_at' => $now,
             'crawl_cursor_max_floor_number' => $maxFloor,
@@ -1085,10 +1100,8 @@ class NgaLiteCrawler
             'truncated_at_page_number' => $hasMorePages ? $endPageFetched : null,
             // 分段补齐游标：下次从最后抓到的页码+1开始
             'crawl_backfill_next_page_number' => $hasMorePages ? ($endPageFetched + 1) : null,
-            // 业务规则：回复数展示优先信任详情页口径；仅在“已抓到末页”时才用楼层号兜底
-            'reply_count_display' => $resolvedReplyCountDisplay === null
-                ? (int) $thread->reply_count_display
-                : $resolvedReplyCountDisplay,
+            // 业务规则：回复数展示优先信任详情页口径，但保持只增不减。
+            'reply_count_display' => $nextReplyCountDisplay,
         ]);
         $thread->save();
 
@@ -1600,6 +1613,28 @@ class NgaLiteCrawler
         $allNonPinnedOutOfWindow = $hasNonPinnedThread && !$hasNonPinnedInWindow && $hasNonPinnedOutOfWindow;
 
         return $allNonPinnedOutOfWindow;
+    }
+
+    /**
+     * 计算有效回复数（只增不减）。
+     *
+     * @param int $current 当前已记录的回复数
+     * @param int|null $candidate 本次抓取得到的回复数（缺失时为 null）
+     * @return int 计算后的有效回复数
+     * 无副作用。
+     */
+    private function resolveEffectiveReplyCountDisplay(int $current, ?int $candidate): int
+    {
+        if ($candidate === null) {
+            return $current;
+        }
+
+        // 业务规则：回复数只增不减，避免列表缺失值或回退覆盖真实值。
+        if ($candidate < $current) {
+            return $current;
+        }
+
+        return $candidate;
     }
 
     /**
