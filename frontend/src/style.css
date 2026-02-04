@@ -497,6 +497,15 @@ a {
   border-radius: 8px;
 }
 
+.post-content blockquote .reply-quote-header,
+.revision-content blockquote .reply-quote-header {
+  margin-bottom: 8px;
+}
+
+.post-content .reply-quote-body {
+  margin-top: 8px;
+}
+
 .post-content pre {
   background: #111827;
   color: #f9fafb;

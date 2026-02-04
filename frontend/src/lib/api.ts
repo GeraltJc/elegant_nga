@@ -45,6 +45,17 @@ export type ThreadPost = {
   revision_count: number
 }
 
+export type PostQuote = {
+  source_thread_id: number
+  source_post_id: number
+  floor_number: number
+  author_name: string
+  post_created_at: string | null
+  content_html: string
+  is_deleted_by_source: boolean
+  is_folded_by_source: boolean
+}
+
 export type PostRevision = {
   revision_created_at: string | null
   source_edited_at: string | null
@@ -195,6 +206,11 @@ export const fetchThreadPosts = (
   threadId: number,
   params?: { page?: number; per_page?: number }
 ): Promise<ApiListResponse<ThreadPost>> => requestJson(`/api/threads/${threadId}/posts`, params)
+
+export const fetchPostQuote = (
+  threadId: number,
+  pid: number
+): Promise<ApiItemResponse<PostQuote>> => requestJson(`/api/threads/${threadId}/posts/quote`, { pid })
 
 /**
  * 获取指定楼层的历史版本列表（按时间倒序）。

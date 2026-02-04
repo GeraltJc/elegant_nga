@@ -3,9 +3,11 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   fetchThread,
+  fetchPostQuote,
   fetchPostRevisions,
   fetchThreadPosts,
   type ApiMeta,
+  type PostQuote,
   type PostRevision,
   type ThreadDetail,
   type ThreadPost,
@@ -41,7 +43,34 @@ type RevisionState = {
   data: PostRevision[]
 }
 
+type ReplyHeaderMeta = {
+  pid: number
+  sourceThreadId: number | null
+  headerUbb: string
+  bodyUbb: string
+}
+
+type QuoteState = {
+  loading: boolean
+  error: string
+  data: PostQuote | null
+}
+
 const revisionStates = ref<Record<number, RevisionState>>({})
+const replyHeaderMetaByPostId = ref<Record<number, ReplyHeaderMeta | null>>({})
+const quoteStates = ref<Record<string, QuoteState>>({})
+// 业务含义：按楼层聚合引用内容状态，避免模板中重复计算。
+const quoteStateByPostId = computed(() => {
+  const nextMap: Record<number, QuoteState | null> = {}
+  Object.entries(replyHeaderMetaByPostId.value).forEach(([postId, meta]) => {
+    if (!meta) {
+      nextMap[Number(postId)] = null
+      return
+    }
+    nextMap[Number(postId)] = getQuoteState(meta)
+  })
+  return nextMap
+})
 
 /**
  * 标准化图片地址，补齐附件域名。
@@ -131,6 +160,241 @@ const normalizeUbbMetaTags = (html: string): string => {
     }
   )
   return output
+}
+
+/**
+ * 从 Reply to 头部提取 pid 与 tid 信息。
+ *
+ * @param text Reply to 头部原始文本（可能是 UBB 或 HTML）
+ * @return pid 与 tid 信息
+ */
+const extractReplyPidAndThreadId = (
+  text: string
+): { pid: number | null; sourceThreadId: number | null } => {
+  if (text === '') {
+    return { pid: null, sourceThreadId: null }
+  }
+
+  const ubbMatch = text.match(/\[pid=(\d+)(?:,(\d+))?(?:,\d+)?\]/i)
+  if (ubbMatch) {
+    const pid = Number.parseInt(ubbMatch[1], 10)
+    const tid = ubbMatch[2] ? Number.parseInt(ubbMatch[2], 10) : null
+    return {
+      pid: Number.isNaN(pid) ? null : pid,
+      sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
+    }
+  }
+
+  // 业务规则：优先从 data 属性读取，避免解析 URL 时误匹配其他数字。
+  const dataPidMatch = text.match(/data-pid=["'](\d+)["']/i)
+  const dataTidMatch = text.match(/data-tid=["'](\d+)["']/i)
+  if (dataPidMatch) {
+    const pid = Number.parseInt(dataPidMatch[1], 10)
+    const tid = dataTidMatch ? Number.parseInt(dataTidMatch[1], 10) : null
+    return {
+      pid: Number.isNaN(pid) ? null : pid,
+      sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
+    }
+  }
+
+  const urlPidMatch = text.match(/(?:pid=)(\d+)/i)
+  const urlTidMatch = text.match(/(?:tid=)(\d+)/i)
+  if (urlPidMatch) {
+    const pid = Number.parseInt(urlPidMatch[1], 10)
+    const tid = urlTidMatch ? Number.parseInt(urlTidMatch[1], 10) : null
+    return {
+      pid: Number.isNaN(pid) ? null : pid,
+      sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
+    }
+  }
+
+  return { pid: null, sourceThreadId: null }
+}
+
+/**
+ * 解析 UBB Reply to 头部，拆分引用头与正文。
+ *
+ * @param input 去除前导空白后的楼层内容
+ * @return Reply to 头部信息或 null
+ */
+const parseReplyHeaderByUbb = (input: string): ReplyHeaderMeta | null => {
+  const headerMatch = input.match(/^(\[b\][\s\S]*?\[\/b\])((?:<br\s*\/?>\s*){1,2})/i)
+  if (!headerMatch) {
+    return null
+  }
+
+  let headerUbb = headerMatch[1]
+  // 业务规则：仅处理以 Reply to 开头的引用头部，避免误判普通加粗文本。
+  const isReplyHeader = /^\[b\]\s*Reply to /i.test(headerUbb)
+  if (!isReplyHeader) {
+    return null
+  }
+
+  // 业务规则：Reply to 头部自带 Reply 链接时移除重复前缀，使展示与 quote 保持一致。
+  headerUbb = headerUbb.replace(/^\[b\]\s*Reply to\s*(\[pid=[^\]]+\]Reply\[\/pid\])/i, '[b]$1')
+
+  const { pid, sourceThreadId } = extractReplyPidAndThreadId(headerUbb)
+  if (!pid) {
+    return null
+  }
+
+  const bodyUbb = input.slice(headerMatch[0].length)
+
+  return {
+    pid,
+    sourceThreadId,
+    headerUbb,
+    bodyUbb,
+  }
+}
+
+/**
+ * 解析 HTML Reply to 头部，拆分引用头与正文。
+ *
+ * @param input 去除前导空白后的楼层内容
+ * @return Reply to 头部信息或 null
+ */
+const parseReplyHeaderByHtml = (input: string): ReplyHeaderMeta | null => {
+  const headerMatch = input.match(/^((?:<strong>|<b>)[\s\S]*?<\/(?:strong|b)>)(?:<br\s*\/?>\s*){1,2}/i)
+  if (!headerMatch) {
+    return null
+  }
+
+  let headerUbb = headerMatch[1]
+  // 业务规则：仅处理以 Reply to 开头的引用头部，避免误判普通加粗文本。
+  const isReplyHeader = /^(?:<strong>|<b>)\s*Reply to /i.test(headerUbb)
+  if (!isReplyHeader) {
+    return null
+  }
+
+  // 业务规则：HTML 头部若包含 pid 的 Reply 链接，移除重复 Reply to 前缀。
+  headerUbb = headerUbb.replace(
+    /^(<strong>|<b>)\s*Reply to\s*(<span[^>]*class=["']nga-ubb-pid["'][^>]*>\s*Reply\s*<\/span>)/i,
+    '$1$2'
+  )
+
+  const { pid, sourceThreadId } = extractReplyPidAndThreadId(headerUbb)
+  if (!pid) {
+    return null
+  }
+
+  const bodyUbb = input.slice(headerMatch[0].length)
+
+  return {
+    pid,
+    sourceThreadId,
+    headerUbb,
+    bodyUbb,
+  }
+}
+
+/**
+ * 提取 Reply to 头部信息，若不存在则返回 null。
+ *
+ * @param html 原始楼层 HTML/UBB 字符串
+ * @return Reply to 头部信息或 null
+ */
+const extractReplyHeaderMeta = (html: string): ReplyHeaderMeta | null => {
+  if (html === '') {
+    return null
+  }
+
+  const trimmed = html.replace(/^\s+/, '')
+  const ubbMeta = parseReplyHeaderByUbb(trimmed)
+  if (ubbMeta) {
+    return ubbMeta
+  }
+
+  return parseReplyHeaderByHtml(trimmed)
+}
+
+/**
+ * 构造引用内容缓存 key，避免跨主题 pid 冲突。
+ *
+ * @param pid 来源 pid
+ * @param sourceThreadId 主题 tid
+ * @return 缓存 key
+ */
+const buildQuoteKey = (pid: number, sourceThreadId: number): string =>
+  `${sourceThreadId}:${pid}`
+
+/**
+ * 解析引用内容的主题编号，优先使用 Reply to 头部的 tid。
+ *
+ * @param meta Reply to 头部信息
+ * @return 主题 tid 或 null
+ */
+const resolveQuoteThreadId = (meta: ReplyHeaderMeta): number | null => {
+  if (meta.sourceThreadId && meta.sourceThreadId > 0) {
+    return meta.sourceThreadId
+  }
+  return threadId.value
+}
+
+/**
+ * 获取引用内容缓存状态。
+ *
+ * @param meta Reply to 头部信息
+ * @return 引用内容状态或 null
+ */
+const getQuoteState = (meta: ReplyHeaderMeta): QuoteState | null => {
+  const resolvedThreadId = resolveQuoteThreadId(meta)
+  if (!resolvedThreadId) {
+    return null
+  }
+  const key = buildQuoteKey(meta.pid, resolvedThreadId)
+  return quoteStates.value[key] ?? null
+}
+
+/**
+ * 确保引用内容已加载，避免重复请求。
+ *
+ * @param meta Reply to 头部信息
+ * @return Promise<void>
+ * 副作用：更新引用内容加载状态。
+ */
+const ensureQuoteLoaded = async (meta: ReplyHeaderMeta) => {
+  const resolvedThreadId = resolveQuoteThreadId(meta)
+  if (!resolvedThreadId) {
+    return
+  }
+
+  const key = buildQuoteKey(meta.pid, resolvedThreadId)
+  const existing = quoteStates.value[key]
+  if (existing?.loading || existing?.data) {
+    return
+  }
+
+  // 业务规则：每次更新都替换整个状态对象，确保响应式更新生效。
+  quoteStates.value = {
+    ...quoteStates.value,
+    [key]: {
+      loading: true,
+      error: '',
+      data: null,
+    },
+  }
+
+  try {
+    const response = await fetchPostQuote(resolvedThreadId, meta.pid)
+    quoteStates.value = {
+      ...quoteStates.value,
+      [key]: {
+        loading: false,
+        error: '',
+        data: response.data,
+      },
+    }
+  } catch (error) {
+    quoteStates.value = {
+      ...quoteStates.value,
+      [key]: {
+        loading: false,
+        error: error instanceof Error ? error.message : '加载失败',
+        data: null,
+      },
+    }
+  }
 }
 
 /**
@@ -381,6 +645,23 @@ const goToPage = (page: number) => {
 }
 
 watch(
+  posts,
+  (nextPosts) => {
+    // 业务规则：预解析 Reply to 头部并触发引用内容加载，保证首屏可读性。
+    const nextMap: Record<number, ReplyHeaderMeta | null> = {}
+    nextPosts.forEach((post) => {
+      const meta = extractReplyHeaderMeta(post.content_html)
+      nextMap[post.post_id] = meta
+      if (meta) {
+        ensureQuoteLoaded(meta)
+      }
+    })
+    replyHeaderMetaByPostId.value = nextMap
+  },
+  { immediate: true }
+)
+
+watch(
   [() => route.params.tid, () => route.query.page],
   () => {
     const id = threadId.value
@@ -461,7 +742,27 @@ watch(
           已折叠
         </span>
       </header>
-      <div class="post-content" v-html="normalizePostHtml(post.content_html)"></div>
+      <div class="post-content">
+        <template v-if="replyHeaderMetaByPostId[post.post_id]">
+          <blockquote>
+            <div
+              class="reply-quote-header"
+              v-html="normalizePostHtml(replyHeaderMetaByPostId[post.post_id]?.headerUbb ?? '')"
+            ></div>
+            <div v-if="quoteStateByPostId[post.post_id]?.loading">引用内容加载中...</div>
+            <div v-else-if="quoteStateByPostId[post.post_id]?.error">引用内容暂不可用</div>
+            <div
+              v-else-if="quoteStateByPostId[post.post_id]?.data"
+              v-html="normalizePostHtml(quoteStateByPostId[post.post_id]!.data!.content_html)"
+            ></div>
+          </blockquote>
+          <div
+            class="reply-quote-body"
+            v-html="normalizePostHtml(replyHeaderMetaByPostId[post.post_id]?.bodyUbb ?? '')"
+          ></div>
+        </template>
+        <div v-else v-html="normalizePostHtml(post.content_html)"></div>
+      </div>
       <div class="post-history">
         <span v-if="post.content_last_changed_at" class="post-history-time">
           最近变更：{{ formatDateTime(post.content_last_changed_at) }}
