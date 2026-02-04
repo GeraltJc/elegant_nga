@@ -16,6 +16,8 @@
 - 如果有任何不直观的实现，请在代码中解释原因。
 - 变量命名清晰优先表达业务、函数短小、结构直观
 - 代码要易读可维护，不允许黑魔法式写法
+- 前端相关改动默认必须执行 `npm run typecheck`；如需跳过须提前说明原因。
+- 本机为 Docker 开发环境：默认使用 `docker compose exec` 执行命令（如前端用 `docker compose exec frontend`，后端用 `docker compose exec php`）。
 
 ## Git 提交流程（强制）
 - 任何 `git commit`（创建 PR）之前，必须先停下来向我确认：

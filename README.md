@@ -290,9 +290,32 @@ npm run dev
 
 ### 4) 前端测试（Vitest）
 
+Docker 方式：
+
+```bash
+docker compose exec frontend npm test
+```
+
+本地方式：
+
 ```bash
 cd frontend
 npm test
+```
+
+### 4.1) 前端类型检查（TypeScript）
+
+Docker 方式：
+
+```bash
+docker compose exec frontend npm run typecheck
+```
+
+本地方式：
+
+```bash
+cd frontend
+npm run typecheck
 ```
 
 > Node 版本：`20.19`（见 `.nvmrc`）。

@@ -177,8 +177,13 @@ const extractReplyPidAndThreadId = (
 
   const ubbMatch = text.match(/\[pid=(\d+)(?:,(\d+))?(?:,\d+)?\]/i)
   if (ubbMatch) {
-    const pid = Number.parseInt(ubbMatch[1], 10)
-    const tid = ubbMatch[2] ? Number.parseInt(ubbMatch[2], 10) : null
+    const pidText = ubbMatch[1] ?? ''
+    const tidText = ubbMatch[2] ?? ''
+    if (pidText === '') {
+      return { pid: null, sourceThreadId: null }
+    }
+    const pid = Number.parseInt(pidText, 10)
+    const tid = tidText !== '' ? Number.parseInt(tidText, 10) : null
     return {
       pid: Number.isNaN(pid) ? null : pid,
       sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
@@ -189,8 +194,13 @@ const extractReplyPidAndThreadId = (
   const dataPidMatch = text.match(/data-pid=["'](\d+)["']/i)
   const dataTidMatch = text.match(/data-tid=["'](\d+)["']/i)
   if (dataPidMatch) {
-    const pid = Number.parseInt(dataPidMatch[1], 10)
-    const tid = dataTidMatch ? Number.parseInt(dataTidMatch[1], 10) : null
+    const pidText = dataPidMatch[1] ?? ''
+    const tidText = dataTidMatch?.[1] ?? ''
+    if (pidText === '') {
+      return { pid: null, sourceThreadId: null }
+    }
+    const pid = Number.parseInt(pidText, 10)
+    const tid = tidText !== '' ? Number.parseInt(tidText, 10) : null
     return {
       pid: Number.isNaN(pid) ? null : pid,
       sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
@@ -200,8 +210,13 @@ const extractReplyPidAndThreadId = (
   const urlPidMatch = text.match(/(?:pid=)(\d+)/i)
   const urlTidMatch = text.match(/(?:tid=)(\d+)/i)
   if (urlPidMatch) {
-    const pid = Number.parseInt(urlPidMatch[1], 10)
-    const tid = urlTidMatch ? Number.parseInt(urlTidMatch[1], 10) : null
+    const pidText = urlPidMatch[1] ?? ''
+    const tidText = urlTidMatch?.[1] ?? ''
+    if (pidText === '') {
+      return { pid: null, sourceThreadId: null }
+    }
+    const pid = Number.parseInt(pidText, 10)
+    const tid = tidText !== '' ? Number.parseInt(tidText, 10) : null
     return {
       pid: Number.isNaN(pid) ? null : pid,
       sourceThreadId: tid !== null && Number.isNaN(tid) ? null : tid,
@@ -223,7 +238,12 @@ const parseReplyHeaderByUbb = (input: string): ReplyHeaderMeta | null => {
     return null
   }
 
-  let headerUbb = headerMatch[1]
+  const headerRaw = headerMatch[1] ?? ''
+  const headerFullMatch = headerMatch[0] ?? ''
+  if (headerRaw === '' || headerFullMatch === '') {
+    return null
+  }
+  let headerUbb = headerRaw
   // 业务规则：仅处理以 Reply to 开头的引用头部，避免误判普通加粗文本。
   const isReplyHeader = /^\[b\]\s*Reply to /i.test(headerUbb)
   if (!isReplyHeader) {
@@ -238,7 +258,7 @@ const parseReplyHeaderByUbb = (input: string): ReplyHeaderMeta | null => {
     return null
   }
 
-  const bodyUbb = input.slice(headerMatch[0].length)
+  const bodyUbb = input.slice(headerFullMatch.length)
 
   return {
     pid,
@@ -260,7 +280,12 @@ const parseReplyHeaderByHtml = (input: string): ReplyHeaderMeta | null => {
     return null
   }
 
-  let headerUbb = headerMatch[1]
+  const headerRaw = headerMatch[1] ?? ''
+  const headerFullMatch = headerMatch[0] ?? ''
+  if (headerRaw === '' || headerFullMatch === '') {
+    return null
+  }
+  let headerUbb = headerRaw
   // 业务规则：仅处理以 Reply to 开头的引用头部，避免误判普通加粗文本。
   const isReplyHeader = /^(?:<strong>|<b>)\s*Reply to /i.test(headerUbb)
   if (!isReplyHeader) {
@@ -278,7 +303,7 @@ const parseReplyHeaderByHtml = (input: string): ReplyHeaderMeta | null => {
     return null
   }
 
-  const bodyUbb = input.slice(headerMatch[0].length)
+  const bodyUbb = input.slice(headerFullMatch.length)
 
   return {
     pid,
