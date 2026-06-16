@@ -3,10 +3,12 @@
 use App\Http\Controllers\Api\CrawlRunController;
 use App\Http\Controllers\Api\PostController;
 use App\Http\Controllers\Api\PostRevisionController;
+use App\Http\Controllers\Api\SearchController;
 use App\Http\Controllers\Api\ThreadController;
 use App\Http\Controllers\Api\ThreadFloorAuditController;
 use Illuminate\Support\Facades\Route;
 
+Route::get('/search', [SearchController::class, 'index']);
 Route::get('/threads', [ThreadController::class, 'index']);
 Route::get('/threads/{sourceThreadId}', [ThreadController::class, 'show'])
     ->whereNumber('sourceThreadId');

@@ -2,7 +2,9 @@ services:
   nginx:
     image: nginx:1.25-alpine
     depends_on:
-      - php
+      php:
+        condition: service_healthy
+    restart: unless-stopped
     ports:
       - "${NGINX_PORT:-8080}:80"
     environment:
@@ -18,9 +20,18 @@ services:
         TZ: "${TZ:-Asia/Shanghai}"
     image: elegant_nga-php
     depends_on:
-      - mysql
+      mysql:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm -t >/dev/null 2>&1 && nc -z 127.0.0.1 9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     volumes:
       - ./backend:/var/www/backend
 
@@ -28,6 +39,7 @@ services:
     image: elegant_nga-php
     depends_on:
       - mysql
+      - elasticsearch
     restart: unless-stopped
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
@@ -63,6 +75,35 @@ services:
       - mysql_data:/var/lib/mysql
       - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:9200 >/dev/null || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.19.0
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+
 volumes:
   mysql_data:
   frontend_node_modules:
+  elasticsearch_data:
